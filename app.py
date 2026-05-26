@@ -21,6 +21,10 @@ def env(name, default=None):
     return value
 
 
+def gemini_model():
+    return os.environ.get("GEMINI_MODEL", "gemini-1.5-flash")
+
+
 def strip_tone(text):
     normalized = unicodedata.normalize("NFD", text or "")
     return "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn").lower()
@@ -243,7 +247,7 @@ JSON schema: {{"intent":"...", "entity":"...", "id":"..."}}
 """
     try:
         res = requests.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={key}",
+            f"https://generativelanguage.googleapis.com/v1beta/models/{gemini_model()}:generateContent?key={key}",
             json={"contents": [{"parts": [{"text": prompt}]}]},
             timeout=20,
         )
@@ -338,6 +342,34 @@ def handle_text(text):
 @app.get("/health")
 def health():
     return {"ok": True}
+
+
+@app.get("/debug/gemini/<secret>")
+def debug_gemini(secret):
+    if secret != env("WEBHOOK_SECRET"):
+        abort(404)
+    key = os.environ.get("GEMINI_API_KEY")
+    if not key:
+        return {"ok": False, "model": gemini_model(), "error": "missing GEMINI_API_KEY"}, 200
+    try:
+        res = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{gemini_model()}:generateContent?key={key}",
+            json={"contents": [{"parts": [{"text": "Reply with only OK."}]}]},
+            timeout=20,
+        )
+        payload = None
+        try:
+            payload = res.json()
+        except Exception:
+            payload = {"raw": res.text[:500]}
+        return {
+            "ok": res.ok,
+            "status_code": res.status_code,
+            "model": gemini_model(),
+            "response": payload,
+        }, 200
+    except Exception as exc:
+        return {"ok": False, "model": gemini_model(), "error": str(exc)}, 200
 
 
 @app.post("/telegram/<secret>")
