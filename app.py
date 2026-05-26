@@ -240,7 +240,7 @@ def gemini_intent(text):
     prompt = f"""
 Phân loại ý định Telegram Ads assistant.
 Chỉ trả JSON, không giải thích.
-Intent hợp lệ: report, recommendations, best_ads, campaigns, pause, resume, cancel, help, unknown.
+Intent hợp lệ: report, recommendations, best_ads, campaigns, pause, resume, content, cancel, help, unknown.
 Entity hợp lệ: campaign, adset, ad, none.
 Text: {text}
 JSON schema: {{"intent":"...", "entity":"...", "id":"..."}}
@@ -260,6 +260,35 @@ JSON schema: {{"intent":"...", "entity":"...", "id":"..."}}
     except Exception:
         app.logger.exception("Gemini intent parse failed")
         return {"intent": "gemini_unavailable", "entity": "none", "id": ""}
+
+
+def gemini_generate_text(user_text):
+    key = os.environ.get("GEMINI_API_KEY")
+    if not key:
+        return "Chưa có GEMINI_API_KEY nên chưa tạo nội dung được."
+    prompt = f"""
+Bạn là trợ lý marketing tiếng Việt cho ngành đồng phục, bảo hộ lao động, may mặc.
+Viết tự nhiên, rõ ràng, thực tế. Không dùng giọng quảng cáo quá đà.
+Không dùng hashtag trừ khi người dùng yêu cầu.
+Nếu người dùng yêu cầu bài viết, hãy viết có tiêu đề, mở bài ngắn, các ý chính rõ ràng, kết bài có lời kêu gọi hành động nhẹ.
+Giữ độ dài vừa phải để gửi Telegram.
+
+Yêu cầu của người dùng:
+{user_text}
+"""
+    try:
+        res = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{gemini_model()}:generateContent?key={key}",
+            json={"contents": [{"parts": [{"text": prompt}]}]},
+            timeout=30,
+        )
+        if not res.ok:
+            app.logger.warning("Gemini content failed: %s", res.text[:500])
+            return "Gemini hiện không khả dụng hoặc đã hết quota. Mình chưa tạo nội dung được lúc này."
+        return res.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+    except Exception as exc:
+        app.logger.exception("Gemini content generation failed")
+        return f"Lỗi khi tạo nội dung: {exc}"
 
 
 def add_pending(entity, entity_id, status):
@@ -292,6 +321,8 @@ def handle_text(text):
         return recommendations_text(text)
     if any(x in plain for x in ["bao cao", "report", "ads hom nay", "ads hnay", "ads hom qua", "tinh hinh ads", "ads the nao"]):
         return report_text(text)
+    if any(x in plain for x in ["tao cho toi", "viet cho toi", "viet bai", "tao bai", "tao noi dung", "viet noi dung", "caption", "content"]):
+        return gemini_generate_text(text)
     if any(x in plain for x in ["campaign", "chien dich"]) and not any(x in plain for x in ["dung", "tat", "bat", "pause", "resume"]):
         return campaigns_text()
     match = re.search(r"(dung|tat|pause)\s+(campaign|chien dich|adset|nhom quang cao|ad|ads|quang cao)\s+(\d+)", plain)
@@ -327,6 +358,8 @@ def handle_text(text):
             return "Mình hiểu bạn muốn chỉnh quảng cáo, nhưng thiếu ID campaign/adset/ad. Gửi rõ dạng: dừng campaign <id>."
         if intent.get("intent") == "help":
             return help_text()
+        if intent.get("intent") == "content":
+            return gemini_generate_text(text)
         if intent.get("intent") == "cancel":
             PENDING.clear()
             return "Đã hủy các lệnh đang chờ xác nhận."
