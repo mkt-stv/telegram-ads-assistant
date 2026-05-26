@@ -348,12 +348,13 @@ def health():
 def debug_gemini(secret):
     if secret != env("WEBHOOK_SECRET"):
         abort(404)
+    model = request.args.get("model") or gemini_model()
     key = os.environ.get("GEMINI_API_KEY")
     if not key:
-        return {"ok": False, "model": gemini_model(), "error": "missing GEMINI_API_KEY"}, 200
+        return {"ok": False, "model": model, "error": "missing GEMINI_API_KEY"}, 200
     try:
         res = requests.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{gemini_model()}:generateContent?key={key}",
+            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}",
             json={"contents": [{"parts": [{"text": "Reply with only OK."}]}]},
             timeout=20,
         )
@@ -365,11 +366,11 @@ def debug_gemini(secret):
         return {
             "ok": res.ok,
             "status_code": res.status_code,
-            "model": gemini_model(),
+            "model": model,
             "response": payload,
         }, 200
     except Exception as exc:
-        return {"ok": False, "model": gemini_model(), "error": str(exc)}, 200
+        return {"ok": False, "model": model, "error": str(exc)}, 200
 
 
 @app.post("/telegram/<secret>")
