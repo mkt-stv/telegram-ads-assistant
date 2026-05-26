@@ -22,7 +22,7 @@ def env(name, default=None):
 
 
 def gemini_model():
-    return os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+    return os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite")
 
 
 def strip_tone(text):
