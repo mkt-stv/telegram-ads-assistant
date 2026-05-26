@@ -241,19 +241,21 @@ Entity hợp lệ: campaign, adset, ad, none.
 Text: {text}
 JSON schema: {{"intent":"...", "entity":"...", "id":"..."}}
 """
-    res = requests.post(
-        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={key}",
-        json={"contents": [{"parts": [{"text": prompt}]}]},
-        timeout=20,
-    )
-    if not res.ok:
-        return None
-    raw = res.json()["candidates"][0]["content"]["parts"][0]["text"]
-    raw = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     try:
+        res = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={key}",
+            json={"contents": [{"parts": [{"text": prompt}]}]},
+            timeout=20,
+        )
+        if not res.ok:
+            app.logger.warning("Gemini failed: %s", res.text[:500])
+            return {"intent": "gemini_unavailable", "entity": "none", "id": ""}
+        raw = res.json()["candidates"][0]["content"]["parts"][0]["text"]
+        raw = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
         return json.loads(raw)
     except Exception:
-        return None
+        app.logger.exception("Gemini intent parse failed")
+        return {"intent": "gemini_unavailable", "entity": "none", "id": ""}
 
 
 def add_pending(entity, entity_id, status):
@@ -282,9 +284,9 @@ def handle_text(text):
         return "Đã hủy các lệnh đang chờ xác nhận."
     if "bai quang cao" in plain and ("tot" in plain or "hieu qua" in plain):
         return best_ads_text(text)
-    if any(x in plain for x in ["nen lam gi", "goi y", "de xuat", "toi uu", "can chu y", "dang te", "dot tien"]):
+    if any(x in plain for x in ["nen lam gi", "goi y", "de xuat", "toi uu", "can chu y", "dang te", "dot tien", "toi nen lam gi"]):
         return recommendations_text(text)
-    if any(x in plain for x in ["bao cao", "report", "ads hom nay", "ads hom qua"]):
+    if any(x in plain for x in ["bao cao", "report", "ads hom nay", "ads hnay", "ads hom qua", "tinh hinh ads", "ads the nao"]):
         return report_text(text)
     if any(x in plain for x in ["campaign", "chien dich"]) and not any(x in plain for x in ["dung", "tat", "bat", "pause", "resume"]):
         return campaigns_text()
@@ -310,6 +312,26 @@ def handle_text(text):
             return report_text(text)
         if intent.get("intent") == "campaigns":
             return campaigns_text()
+        if intent.get("intent") in ["pause", "resume"]:
+            entity = intent.get("entity") or "none"
+            entity_id = intent.get("id") or ""
+            if entity in ["campaign", "adset", "ad"] and entity_id.isdigit():
+                status = "PAUSED" if intent.get("intent") == "pause" else "ACTIVE"
+                code = add_pending(entity, entity_id, status)
+                action = "dừng" if status == "PAUSED" else "bật lại"
+                return f"Mình hiểu là {action} {entity} {entity_id}.\nGửi: CONFIRM {code}\nMã hết hạn sau 15 phút."
+            return "Mình hiểu bạn muốn chỉnh quảng cáo, nhưng thiếu ID campaign/adset/ad. Gửi rõ dạng: dừng campaign <id>."
+        if intent.get("intent") == "help":
+            return help_text()
+        if intent.get("intent") == "cancel":
+            PENDING.clear()
+            return "Đã hủy các lệnh đang chờ xác nhận."
+        if intent.get("intent") == "gemini_unavailable":
+            return (
+                "Gemini hiện không khả dụng hoặc đã hết quota. "
+                "Bot vẫn xử lý được các lệnh cơ bản: báo cáo ads hôm nay, bài quảng cáo nào đang tốt, "
+                "nên làm gì hôm nay, xem danh sách campaign, dừng campaign <id>."
+            )
     return "Mình chưa hiểu rõ. Bạn có thể hỏi: báo cáo ads hôm nay, bài quảng cáo nào đang tốt, hoặc nên làm gì hôm nay."
 
 
