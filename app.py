@@ -241,6 +241,60 @@ def google_sheets_append(sheet_name, values):
     return composio_execute("GOOGLESHEETS_BATCH_UPDATE", payload)
 
 
+def now_text():
+    return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def new_record_id(prefix):
+    return f"{prefix}_{int(time.time())}_{random.randint(1000, 9999)}"
+
+
+def append_content_record(topic, draft_text="", image_prompt="", stage="draft", status="needs_review", platform="facebook"):
+    record_id = new_record_id("content")
+    today = date.today().isoformat()
+    row = [
+        record_id,
+        "",
+        "",
+        platform,
+        "",
+        topic[:500],
+        draft_text,
+        image_prompt,
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        stage,
+        status,
+        now_text(),
+    ]
+    try:
+        google_sheets_append("Content", [row])
+        return record_id, None
+    except Exception as exc:
+        app.logger.exception("Could not append content record")
+        return record_id, str(exc)
+
+
+def append_learning(source, finding, recommendation, confidence="medium", status="active"):
+    row = [new_record_id("learning"), source, finding, recommendation, confidence, status, now_text()]
+    try:
+        google_sheets_append("Learnings", [row])
+        return None
+    except Exception as exc:
+        app.logger.exception("Could not append learning")
+        return str(exc)
+
+
+def sheet_note(error):
+    if error:
+        return f"\n\nChưa ghi được vào Sheet: {error[:300]}"
+    return "\n\nĐã lưu vào Sheet."
+
+
 def composio_upload_file(file_bytes, filename, mimetype, toolkit_slug, tool_slug):
     api_key = env("COMPOSIO_API_KEY")
     file_md5 = hashlib.md5(file_bytes).hexdigest()
@@ -717,6 +771,12 @@ def handle_text(text):
     if plain in ["/cancel", "huy", "cancel"]:
         PENDING.clear()
         return "Đã hủy các lệnh đang chờ xác nhận."
+    if plain in ["image prompt", "prompt anh", "lay prompt anh", "xem prompt anh"]:
+        draft = normalize_draft(LAST_DRAFT.get(chat_key))
+        prompt = draft.get("image_prompt")
+        if not prompt:
+            return "Chưa có image prompt nào. Hãy nhắn: tạo ảnh minh họa cho bài này"
+        return f"Image prompt hiện tại:\n{prompt[:2500]}"
     if agent == "viral_researcher":
         return viral_research_text(text)
     if agent == "viral_formula_analyst":
@@ -726,15 +786,43 @@ def handle_text(text):
         draft_text = draft.get("text", "")
         if any(x in plain for x in ["tao bai", "viet bai", "tao noi dung", "viet noi dung", "caption", "content"]) and not draft_text:
             draft_text = gemini_generate_text(text)
+        image_prompt = image_prompt_from_text(text, draft_text)
         try:
             image_b64 = create_image_for_draft(text, draft_text)
         except Exception as exc:
-            return f"Chưa tạo được ảnh. Kiểm tra OPENAI_API_KEY hoặc quota OpenAI.\nLỗi: {exc}"
-        LAST_DRAFT[chat_key] = {"text": draft_text, "image_b64": image_b64}
+            content_id, sheet_error = append_content_record(
+                topic=text,
+                draft_text=draft_text,
+                image_prompt=image_prompt,
+                stage="image_pending",
+                status="pending_manual_image",
+            )
+            LAST_DRAFT[chat_key] = {
+                "text": draft_text,
+                "image_prompt": image_prompt,
+                "image_status": "pending_manual_image",
+                "content_id": content_id,
+            }
+            save_state()
+            return (
+                "Chưa tạo được ảnh bằng API nên đã chuyển sang hàng chờ tạo ảnh thủ công qua Codex/ChatGPT.\n\n"
+                f"Content ID: {content_id}\n\n"
+                f"Image prompt:\n{image_prompt[:1800]}"
+                + sheet_note(sheet_error)
+                + "\n\nBài viết vẫn có thể duyệt và đăng dạng text. Khi tôi tạo ảnh xong, ảnh sẽ được đưa vào folder Media và cập nhật lại Sheet."
+            )
+        content_id, sheet_error = append_content_record(
+            topic=text,
+            draft_text=draft_text,
+            image_prompt=image_prompt,
+            stage="image_ready",
+            status="needs_review",
+        )
+        LAST_DRAFT[chat_key] = {"text": draft_text, "image_b64": image_b64, "image_prompt": image_prompt, "content_id": content_id}
         save_state()
         if draft_text:
-            return draft_text + "\n\nĐã tạo ảnh minh họa. Nếu muốn đăng cả bài và ảnh, nhắn: đăng bài này lên Facebook"
-        return "Đã tạo ảnh minh họa. Nếu muốn viết thêm nội dung cho ảnh này, nhắn: viết bài cho ảnh vừa tạo."
+            return draft_text + "\n\nĐã tạo ảnh minh họa. Nếu muốn đăng cả bài và ảnh, nhắn: đăng bài này lên Facebook" + sheet_note(sheet_error)
+        return "Đã tạo ảnh minh họa. Nếu muốn viết thêm nội dung cho ảnh này, nhắn: viết bài cho ảnh vừa tạo." + sheet_note(sheet_error)
     if "bai quang cao" in plain and ("tot" in plain or "hieu qua" in plain):
         return best_ads_text(text)
     if any(x in plain for x in ["nen lam gi", "goi y", "de xuat", "toi uu", "can chu y", "dang te", "dot tien", "toi nen lam gi"]):
@@ -743,9 +831,10 @@ def handle_text(text):
         return report_text(text)
     if any(x in plain for x in ["tao cho toi", "viet cho toi", "viet bai", "tao bai", "tao noi dung", "viet noi dung", "caption", "content"]):
         draft = gemini_generate_text(text)
-        LAST_DRAFT[chat_key] = {"text": draft}
+        content_id, sheet_error = append_content_record(topic=text, draft_text=draft)
+        LAST_DRAFT[chat_key] = {"text": draft, "content_id": content_id}
         save_state()
-        return draft + "\n\nNếu muốn tạo ảnh minh họa, nhắn: tạo ảnh minh họa cho bài này\nNếu muốn đăng bài này, nhắn: đăng bài này lên Facebook"
+        return draft + "\n\nNếu muốn tạo ảnh minh họa, nhắn: tạo ảnh minh họa cho bài này\nNếu muốn đăng bài này, nhắn: đăng bài này lên Facebook" + sheet_note(sheet_error)
     if any(x in plain for x in ["dang bai nay len facebook", "dang len facebook", "post bai nay len facebook", "up bai nay len facebook", "dang bai nay len linkedin", "dang len linkedin"]):
         platform = "LinkedIn" if "linkedin" in plain else "Facebook"
         draft = normalize_draft(LAST_DRAFT.get(chat_key))
@@ -755,7 +844,10 @@ def handle_text(text):
         image_b64 = draft.get("image_b64")
         code = add_pending_social(platform, draft_text, image_b64)
         media_note = " kèm ảnh" if image_b64 else ""
-        return f"Mình sẽ đăng bản nháp gần nhất{media_note} lên {platform} qua Composio.\nGửi: CONFIRM {code}\nMã hết hạn sau 15 phút."
+        pending_image_note = ""
+        if draft.get("image_status") == "pending_manual_image" and not image_b64:
+            pending_image_note = "\nẢnh đang chờ tạo thủ công nên lệnh này sẽ đăng text trước."
+        return f"Mình sẽ đăng bản nháp gần nhất{media_note} lên {platform} qua Composio.{pending_image_note}\nGửi: CONFIRM {code}\nMã hết hạn sau 15 phút."
     if any(x in plain for x in ["campaign", "chien dich"]) and not any(x in plain for x in ["dung", "tat", "bat", "pause", "resume"]):
         return campaigns_text()
     match = re.search(r"(dung|tat|pause)\s+(campaign|chien dich|adset|nhom quang cao|ad|ads|quang cao)\s+(\d+)", plain)
@@ -793,9 +885,10 @@ def handle_text(text):
             return help_text()
         if intent.get("intent") == "content":
             draft = gemini_generate_text(text)
-            LAST_DRAFT[chat_key] = {"text": draft}
+            content_id, sheet_error = append_content_record(topic=text, draft_text=draft)
+            LAST_DRAFT[chat_key] = {"text": draft, "content_id": content_id}
             save_state()
-            return draft + "\n\nNếu muốn tạo ảnh minh họa, nhắn: tạo ảnh minh họa cho bài này\nNếu muốn đăng bài này, nhắn: đăng bài này lên Facebook"
+            return draft + "\n\nNếu muốn tạo ảnh minh họa, nhắn: tạo ảnh minh họa cho bài này\nNếu muốn đăng bài này, nhắn: đăng bài này lên Facebook" + sheet_note(sheet_error)
         if intent.get("intent") == "cancel":
             PENDING.clear()
             return "Đã hủy các lệnh đang chờ xác nhận."
