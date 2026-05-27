@@ -9,7 +9,7 @@ Telegram
   -> Render Flask webhook
   -> Agent Manager
   -> Agent con
-  -> Meta Ads / Gemini / OpenAI Images / Composio
+  -> Google Sheet / Meta Ads / Gemini / OpenAI Images / Composio
   -> Telegram reply
 ```
 
@@ -25,6 +25,29 @@ Telegram
 - `image_creator`: creates illustration images with OpenAI Images API.
 - `social_publisher`: posts text or text+image to Facebook/LinkedIn via Composio after CONFIRM.
 - `memory_scheduler`: stores the latest draft now; later will own style memory, schedule, and database.
+
+## Google Sheet Workspace
+
+The shared workspace is `STV AI Agent Workspace` in the Drive folder `AI AUTOMATION`.
+
+- Drive folder ID: `11T-9iJ-Q7WL6SnKXZ7cPzGw1FjTmPEeV`
+- Sheet ID: `1CjQsVzTAJSBXjhZGD3iwailQ7tTzUc4KjoV7fukywTk`
+- Media folder ID: `1HqojclzE5iaPVovTGa-_A43P5oLx8CLw`
+
+Tabs:
+
+- `Settings`: global config, CTA, footer, brand tone, default post times.
+- `Content_Pillars`: P1-P6 strategy data.
+- `Research`: viral post candidates and research notes.
+- `Content`: content calendar, draft text, image URL, approval status, post URL, 7-day engagement.
+- `Reports`: daily, weekly, monthly reports.
+- `Learnings`: reusable insights for Agent Manager.
+
+The next production step is to replace `/tmp` draft storage with this Sheet. Render cannot use the local Codex Google Drive connector, so runtime auth must be one of:
+
+- Google service account shared into the Sheet.
+- Google Apps Script proxy owned by this Sheet.
+- Composio Google Sheets action, if connected in the same Composio project.
 
 ## Viral Research Flow
 

@@ -47,6 +47,16 @@ def openai_image_model():
     return os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1.5")
 
 
+def workspace_config():
+    return {
+        "drive_folder_id": os.environ.get("GOOGLE_DRIVE_FOLDER_ID", ""),
+        "sheet_id": os.environ.get("GOOGLE_SHEET_ID", ""),
+        "media_folder_id": os.environ.get("GOOGLE_MEDIA_FOLDER_ID", ""),
+        "default_cta": os.environ.get("DEFAULT_CTA", ""),
+        "default_footer": os.environ.get("DEFAULT_FOOTER", ""),
+    }
+
+
 def state_file():
     return os.environ.get("BOT_STATE_FILE", "/tmp/telegram_ads_assistant_state.json")
 
@@ -445,12 +455,19 @@ def gemini_generate_text(user_text):
     key = os.environ.get("GEMINI_API_KEY")
     if not key:
         return "Chưa có GEMINI_API_KEY nên chưa tạo nội dung được."
+    config = workspace_config()
     prompt = f"""
 Bạn là trợ lý marketing tiếng Việt cho ngành đồng phục, bảo hộ lao động, may mặc.
 Viết tự nhiên, rõ ràng, thực tế. Không dùng giọng quảng cáo quá đà.
-Không dùng hashtag trừ khi người dùng yêu cầu.
-Nếu người dùng yêu cầu bài viết, hãy viết có tiêu đề, mở bài ngắn, các ý chính rõ ràng, kết bài có lời kêu gọi hành động nhẹ.
+Nếu người dùng yêu cầu bài viết, hãy viết có tiêu đề, mở bài ngắn, các ý chính rõ ràng.
+Mọi bài post thương hiệu phải gắn CTA và footer chuẩn bên dưới, trừ khi người dùng nói rõ là không cần.
 Giữ độ dài vừa phải để gửi Telegram.
+
+CTA chuẩn:
+{config["default_cta"]}
+
+Footer chuẩn:
+{config["default_footer"]}
 
 Yêu cầu của người dùng:
 {user_text}
@@ -770,6 +787,22 @@ def debug_openai(secret):
         "has_api_key": bool(os.environ.get("OPENAI_API_KEY")),
         "image_model": openai_image_model(),
         "image_size": os.environ.get("OPENAI_IMAGE_SIZE", "1024x1024"),
+    }
+
+
+@app.get("/debug/workspace/<secret>")
+def debug_workspace(secret):
+    if secret != env("WEBHOOK_SECRET"):
+        abort(404)
+    config = workspace_config()
+    return {
+        "drive_folder_id": config["drive_folder_id"],
+        "sheet_id": config["sheet_id"],
+        "media_folder_id": config["media_folder_id"],
+        "has_default_cta": bool(config["default_cta"]),
+        "has_default_footer": bool(config["default_footer"]),
+        "state_file": state_file(),
+        "sheet_runtime_auth": "not_configured",
     }
 
 
