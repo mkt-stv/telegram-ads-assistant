@@ -244,12 +244,29 @@ def compact_spaces(text):
     return re.sub(r"\s+", " ", (text or "").strip())
 
 
-def image_hook_from_draft(draft_text, fallback="Đồng phục chuẩn, nâng tầm hình ảnh doanh nghiệp"):
+def limit_words(text, max_words=8):
+    words = compact_spaces(text).split()
+    if len(words) <= max_words:
+        return " ".join(words)
+    return " ".join(words[:max_words])
+
+
+def image_hook_from_draft(draft_text, fallback="Đồng phục chuẩn, doanh nghiệp chuyên nghiệp"):
     for line in (draft_text or "").splitlines():
         cleaned = compact_spaces(line).strip("-•# ")
         if cleaned and len(cleaned) >= 8:
-            return cleaned[:90]
-    return fallback
+            return limit_words(cleaned, 8)
+    return limit_words(fallback, 8)
+
+
+def preview_text(text, max_chars=3000):
+    text = text or ""
+    if len(text) <= max_chars:
+        return text
+    preview = text[:max_chars]
+    if "\n" in preview:
+        preview = preview.rsplit("\n", 1)[0]
+    return preview.rstrip() + "\n..."
 
 
 def strip_tone(text):
@@ -1076,7 +1093,7 @@ def handle_text(text):
             return (
                 "Chưa tạo được ảnh bằng API nên đã chuyển sang hàng chờ tạo ảnh thủ công qua Codex/ChatGPT.\n\n"
                 f"Content ID: {content_id}\n\n"
-                f"Image prompt:\n{image_prompt[:1800]}"
+                f"Image prompt:\n{preview_text(image_prompt)}"
                 + sheet_note(sheet_error)
                 + "\n\nBài viết vẫn có thể duyệt và đăng dạng text. Khi tôi tạo ảnh xong, ảnh sẽ được đưa vào folder Media và cập nhật lại Sheet."
             )
