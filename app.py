@@ -12,6 +12,7 @@ from flask import Flask, abort, request
 app = Flask(__name__)
 
 PENDING = {}
+LAST_DRAFT = {}
 
 
 def env(name, default=None):
@@ -38,6 +39,44 @@ def send_telegram(text):
         data={"chat_id": chat_id, "text": text[:3900]},
         timeout=20,
     ).raise_for_status()
+
+
+def composio_execute(action_id, input_payload):
+    api_key = env("COMPOSIO_API_KEY")
+    body = {"input": input_payload}
+    connected_account_id = os.environ.get("COMPOSIO_CONNECTED_ACCOUNT_ID")
+    if connected_account_id:
+        body["connectedAccountId"] = connected_account_id
+        body["connected_account_id"] = connected_account_id
+    res = requests.post(
+        f"https://backend.composio.dev/api/v2/actions/{action_id}/execute",
+        headers={"x-api-key": api_key, "Content-Type": "application/json"},
+        json=body,
+        timeout=45,
+    )
+    if not res.ok:
+        raise RuntimeError(res.text)
+    return res.json()
+
+
+def post_to_social(platform, text):
+    platform_key = strip_tone(platform).upper()
+    if "FACEBOOK" in platform_key:
+        action_id = env("COMPOSIO_FACEBOOK_POST_ACTION_ID")
+        default_payload = {"message": text}
+        payload_json = os.environ.get("COMPOSIO_FACEBOOK_POST_INPUT_JSON")
+    elif "INSTAGRAM" in platform_key:
+        action_id = env("COMPOSIO_INSTAGRAM_POST_ACTION_ID")
+        default_payload = {"caption": text}
+        payload_json = os.environ.get("COMPOSIO_INSTAGRAM_POST_INPUT_JSON")
+    else:
+        raise RuntimeError(f"Chưa hỗ trợ nền tảng: {platform}")
+
+    if payload_json:
+        payload = json.loads(payload_json.replace("{text}", text))
+    else:
+        payload = default_payload
+    return composio_execute(action_id, payload)
 
 
 def meta_get(path, params=None):
@@ -297,10 +336,25 @@ def add_pending(entity, entity_id, status):
     return code
 
 
+def add_pending_social(platform, text):
+    code = str(random.randint(1000, 9999))
+    PENDING[code] = {
+        "type": "social_post",
+        "platform": platform,
+        "text": text,
+        "expires": time.time() + 900,
+    }
+    return code
+
+
 def confirm(code):
     item = PENDING.get(code)
     if not item or item["expires"] < time.time():
         return "Mã CONFIRM không đúng hoặc đã hết hạn."
+    if item.get("type") == "social_post":
+        result = post_to_social(item["platform"], item["text"])
+        del PENDING[code]
+        return f"Đã gửi bài lên {item['platform']} qua Composio.\nKết quả: {json.dumps(result, ensure_ascii=False)[:1000]}"
     meta_post(item["id"], {"status": item["status"]})
     del PENDING[code]
     return f"Đã thực hiện: {item['entity']} {item['id']} -> {item['status']}"
@@ -308,6 +362,7 @@ def confirm(code):
 
 def handle_text(text):
     plain = strip_tone(text)
+    chat_key = "default"
     if plain in ["/help", "help"]:
         return help_text()
     if plain.startswith("confirm "):
@@ -322,7 +377,15 @@ def handle_text(text):
     if any(x in plain for x in ["bao cao", "report", "ads hom nay", "ads hnay", "ads hom qua", "tinh hinh ads", "ads the nao"]):
         return report_text(text)
     if any(x in plain for x in ["tao cho toi", "viet cho toi", "viet bai", "tao bai", "tao noi dung", "viet noi dung", "caption", "content"]):
-        return gemini_generate_text(text)
+        draft = gemini_generate_text(text)
+        LAST_DRAFT[chat_key] = draft
+        return draft + "\n\nNếu muốn đăng bài này, nhắn: đăng bài này lên Facebook"
+    if any(x in plain for x in ["dang bai nay len facebook", "dang len facebook", "post bai nay len facebook", "up bai nay len facebook"]):
+        draft = LAST_DRAFT.get(chat_key)
+        if not draft:
+            return "Chưa có bản nháp nào để đăng. Hãy nhắn: tạo cho tôi một bài viết về ..."
+        code = add_pending_social("Facebook", draft)
+        return f"Mình sẽ đăng bản nháp gần nhất lên Facebook qua Composio.\nGửi: CONFIRM {code}\nMã hết hạn sau 15 phút."
     if any(x in plain for x in ["campaign", "chien dich"]) and not any(x in plain for x in ["dung", "tat", "bat", "pause", "resume"]):
         return campaigns_text()
     match = re.search(r"(dung|tat|pause)\s+(campaign|chien dich|adset|nhom quang cao|ad|ads|quang cao)\s+(\d+)", plain)
@@ -359,7 +422,9 @@ def handle_text(text):
         if intent.get("intent") == "help":
             return help_text()
         if intent.get("intent") == "content":
-            return gemini_generate_text(text)
+            draft = gemini_generate_text(text)
+            LAST_DRAFT[chat_key] = draft
+            return draft + "\n\nNếu muốn đăng bài này, nhắn: đăng bài này lên Facebook"
         if intent.get("intent") == "cancel":
             PENDING.clear()
             return "Đã hủy các lệnh đang chờ xác nhận."
@@ -404,6 +469,19 @@ def debug_gemini(secret):
         }, 200
     except Exception as exc:
         return {"ok": False, "model": model, "error": str(exc)}, 200
+
+
+@app.get("/debug/composio/<secret>")
+def debug_composio(secret):
+    if secret != env("WEBHOOK_SECRET"):
+        abort(404)
+    status = {
+        "has_api_key": bool(os.environ.get("COMPOSIO_API_KEY")),
+        "has_connected_account_id": bool(os.environ.get("COMPOSIO_CONNECTED_ACCOUNT_ID")),
+        "facebook_action_id": os.environ.get("COMPOSIO_FACEBOOK_POST_ACTION_ID", ""),
+        "instagram_action_id": os.environ.get("COMPOSIO_INSTAGRAM_POST_ACTION_ID", ""),
+    }
+    return status
 
 
 @app.post("/telegram/<secret>")
