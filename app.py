@@ -17,6 +17,8 @@ app = Flask(__name__)
 PENDING = {}
 LAST_DRAFT = {}
 RUNTIME_CONFIG = {}
+CONFIG_LOADED_AT = 0
+CONFIG_TTL_SECONDS = 300
 
 
 AGENT_CATALOG = {
@@ -57,6 +59,7 @@ def image_provider():
 
 
 def workspace_config():
+    refresh_runtime_config_from_sheet()
     return {
         "drive_folder_id": os.environ.get("GOOGLE_DRIVE_FOLDER_ID", ""),
         "sheet_id": os.environ.get("GOOGLE_SHEET_ID", ""),
@@ -97,6 +100,126 @@ def save_state():
             json.dump({"last_draft": LAST_DRAFT, "runtime_config": RUNTIME_CONFIG}, f, ensure_ascii=False)
     except Exception:
         app.logger.exception("Could not save bot state")
+
+
+def parse_table(values):
+    if not values:
+        return []
+    headers = [str(x).strip() for x in values[0]]
+    rows = []
+    for raw in values[1:]:
+        row = {}
+        for idx, header in enumerate(headers):
+            row[header] = raw[idx] if idx < len(raw) else ""
+        rows.append(row)
+    return rows
+
+
+def find_value_ranges(payload):
+    found = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            if isinstance(node.get("valueRanges"), list):
+                found.extend(node["valueRanges"])
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(payload)
+    return found
+
+
+def google_sheets_batch_get(ranges):
+    payload = {"spreadsheet_id": env("GOOGLE_SHEET_ID"), "ranges": ranges}
+    return composio_execute("GOOGLESHEETS_BATCH_GET", payload)
+
+
+def range_values_map(payload):
+    mapped = {}
+    for item in find_value_ranges(payload):
+        range_name = item.get("range", "")
+        values = item.get("values") or []
+        if "!" in range_name:
+            sheet_name = range_name.split("!", 1)[0].strip("'")
+        else:
+            sheet_name = range_name
+        mapped[sheet_name] = values
+    return mapped
+
+
+def active_rows(rows):
+    return [row for row in rows if str(row.get("status", "active")).lower() == "active"]
+
+
+def apply_runtime_config(config):
+    global RUNTIME_CONFIG
+    cleaned = {k: v for k, v in config.items() if v not in [None, ""]}
+    RUNTIME_CONFIG.update(cleaned)
+
+
+def refresh_runtime_config_from_sheet(force=False):
+    global CONFIG_LOADED_AT
+    if not force and time.time() - CONFIG_LOADED_AT < CONFIG_TTL_SECONDS:
+        return False
+    try:
+        payload = google_sheets_batch_get(
+            [
+                "Settings!A1:B80",
+                "Settings_Changes!A1:G300",
+                "Image_Styles!A1:H80",
+                "Campaign_Context!A1:K80",
+            ]
+        )
+        values_by_sheet = range_values_map(payload)
+        config = {}
+
+        settings_rows = parse_table(values_by_sheet.get("Settings", []))
+        for row in settings_rows:
+            key = str(row.get("key", "")).strip()
+            value = row.get("value", "")
+            if key:
+                config[key] = value
+
+        styles = active_rows(parse_table(values_by_sheet.get("Image_Styles", [])))
+        if styles:
+            style = styles[-1]
+            prompt_rules = style.get("prompt_rules", "")
+            negative_rules = style.get("negative_rules", "")
+            aspect_ratio = style.get("aspect_ratio", "")
+            config["image_style"] = " ".join(x for x in [prompt_rules, negative_rules, f"Tỷ lệ: {aspect_ratio}" if aspect_ratio else ""] if x)
+
+        contexts = active_rows(parse_table(values_by_sheet.get("Campaign_Context", [])))
+        if contexts:
+            context = contexts[-1]
+            config["campaign_context"] = (
+                f"{context.get('name', '')}. "
+                f"Sản phẩm ưu tiên: {context.get('priority_products', '')}. "
+                f"Tệp khách hàng: {context.get('target_audience', '')}. "
+                f"Thông điệp chính: {context.get('main_message', '')}."
+            ).strip()
+            if context.get("cta_override"):
+                config["default_cta"] = context.get("cta_override")
+            if context.get("footer_override"):
+                config["default_footer"] = context.get("footer_override")
+
+        changes = active_rows(parse_table(values_by_sheet.get("Settings_Changes", [])))
+        for row in changes:
+            setting_type = str(row.get("setting_type", "")).strip()
+            value = row.get("value", "")
+            if setting_type and value:
+                config[setting_type] = value
+
+        apply_runtime_config(config)
+        CONFIG_LOADED_AT = time.time()
+        save_state()
+        return True
+    except Exception:
+        app.logger.exception("Could not refresh runtime config from Sheet")
+        CONFIG_LOADED_AT = time.time()
+        return False
 
 
 def normalize_draft(draft):
@@ -1293,9 +1416,32 @@ def debug_workspace(secret):
         "media_folder_id": config["media_folder_id"],
         "has_default_cta": bool(config["default_cta"]),
         "has_default_footer": bool(config["default_footer"]),
+        "image_style": config["image_style"][:300],
+        "brand_tone": config["brand_tone"][:300],
+        "campaign_context": config["campaign_context"][:300],
+        "runtime_config_keys": sorted(RUNTIME_CONFIG.keys()),
+        "config_loaded_at": CONFIG_LOADED_AT,
         "state_file": state_file(),
         "sheet_runtime_auth": "composio" if os.environ.get("COMPOSIO_GOOGLESHEETS_CONNECTED_ACCOUNT_ID") else "not_configured",
     }
+
+
+@app.get("/debug/reload-config/<secret>")
+def debug_reload_config(secret):
+    if secret != env("WEBHOOK_SECRET"):
+        abort(404)
+    refreshed = refresh_runtime_config_from_sheet(force=True)
+    config = workspace_config()
+    return {
+        "ok": True,
+        "refreshed": refreshed,
+        "keys": sorted(RUNTIME_CONFIG.keys()),
+        "image_style": config["image_style"][:500],
+        "brand_tone": config["brand_tone"][:500],
+        "campaign_context": config["campaign_context"][:500],
+        "has_default_cta": bool(config["default_cta"]),
+        "has_default_footer": bool(config["default_footer"]),
+    }, 200
 
 
 @app.post("/telegram/<secret>")
