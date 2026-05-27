@@ -271,6 +271,19 @@ def preview_text(text, max_chars=3000):
     return preview.rstrip() + "\n..."
 
 
+def clean_generated_post(text):
+    text = (text or "").strip()
+    text = text.replace("**", "")
+    text = re.sub(r"(?m)^\s*[*•]\s*", "- ", text)
+    text = re.sub(r"(?m)^-\s{2,}", "- ", text)
+
+    match = re.search(r"(HOOK:\s*\n)(.+?)(\n\s*\n|$)", text, flags=re.IGNORECASE | re.DOTALL)
+    if match:
+        hook = compact_spaces(match.group(2))
+        text = text[: match.start(2)] + limit_words(hook, 16) + text[match.end(2) :]
+    return text
+
+
 def strip_tone(text):
     normalized = unicodedata.normalize("NFD", text or "")
     return "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn").lower()
@@ -902,7 +915,7 @@ Yêu cầu của người dùng:
         if not res.ok:
             app.logger.warning("Gemini content failed: %s", res.text[:500])
             return "Gemini hiện không khả dụng hoặc đã hết quota. Mình chưa tạo nội dung được lúc này."
-        return res.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        return clean_generated_post(res.json()["candidates"][0]["content"]["parts"][0]["text"])
     except Exception as exc:
         app.logger.exception("Gemini content generation failed")
         return f"Lỗi khi tạo nội dung: {exc}"
