@@ -16,6 +16,7 @@ app = Flask(__name__)
 
 PENDING = {}
 LAST_DRAFT = {}
+RUNTIME_CONFIG = {}
 
 
 AGENT_CATALOG = {
@@ -60,8 +61,17 @@ def workspace_config():
         "drive_folder_id": os.environ.get("GOOGLE_DRIVE_FOLDER_ID", ""),
         "sheet_id": os.environ.get("GOOGLE_SHEET_ID", ""),
         "media_folder_id": os.environ.get("GOOGLE_MEDIA_FOLDER_ID", ""),
-        "default_cta": os.environ.get("DEFAULT_CTA", "").replace("\\n", "\n"),
-        "default_footer": os.environ.get("DEFAULT_FOOTER", "").replace("\\n", "\n"),
+        "default_cta": RUNTIME_CONFIG.get("default_cta") or os.environ.get("DEFAULT_CTA", "").replace("\\n", "\n"),
+        "default_footer": RUNTIME_CONFIG.get("default_footer") or os.environ.get("DEFAULT_FOOTER", "").replace("\\n", "\n"),
+        "image_style": RUNTIME_CONFIG.get("image_style") or os.environ.get(
+            "DEFAULT_IMAGE_STYLE",
+            "Ảnh thật, sạch, chuyên nghiệp, ánh sáng tự nhiên, phù hợp ngành đồng phục và bảo hộ lao động.",
+        ),
+        "brand_tone": RUNTIME_CONFIG.get("brand_tone") or os.environ.get(
+            "DEFAULT_BRAND_TONE",
+            "Rõ ràng, đáng tin, thực tế, không phóng đại.",
+        ),
+        "campaign_context": RUNTIME_CONFIG.get("campaign_context", ""),
     }
 
 
@@ -70,19 +80,21 @@ def state_file():
 
 
 def load_state():
-    global LAST_DRAFT
+    global LAST_DRAFT, RUNTIME_CONFIG
     try:
         with open(state_file(), "r", encoding="utf-8") as f:
             payload = json.load(f)
         LAST_DRAFT = payload.get("last_draft", {})
+        RUNTIME_CONFIG = payload.get("runtime_config", {})
     except Exception:
         LAST_DRAFT = {}
+        RUNTIME_CONFIG = {}
 
 
 def save_state():
     try:
         with open(state_file(), "w", encoding="utf-8") as f:
-            json.dump({"last_draft": LAST_DRAFT}, f, ensure_ascii=False)
+            json.dump({"last_draft": LAST_DRAFT, "runtime_config": RUNTIME_CONFIG}, f, ensure_ascii=False)
     except Exception:
         app.logger.exception("Could not save bot state")
 
@@ -241,6 +253,28 @@ def google_sheets_append(sheet_name, values):
     return composio_execute("GOOGLESHEETS_BATCH_UPDATE", payload)
 
 
+def google_sheets_write(sheet_name, values, first_cell_location="A1"):
+    payload = {
+        "spreadsheet_id": env("GOOGLE_SHEET_ID"),
+        "sheet_name": sheet_name,
+        "values": values,
+        "first_cell_location": first_cell_location,
+    }
+    return composio_execute("GOOGLESHEETS_BATCH_UPDATE", payload)
+
+
+def google_sheets_add_sheet(sheet_name, rows=200, columns=20):
+    payload = {
+        "spreadsheetId": env("GOOGLE_SHEET_ID"),
+        "properties": {
+            "title": sheet_name,
+            "sheetType": "GRID",
+            "gridProperties": {"rowCount": rows, "columnCount": columns, "frozenRowCount": 1},
+        },
+    }
+    return composio_execute("GOOGLESHEETS_ADD_SHEET", payload)
+
+
 def now_text():
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -286,6 +320,16 @@ def append_learning(source, finding, recommendation, confidence="medium", status
         return None
     except Exception as exc:
         app.logger.exception("Could not append learning")
+        return str(exc)
+
+
+def append_settings_change(setting_type, value, note="", source="telegram"):
+    row = [new_record_id("setting"), setting_type, value, note, source, "active", now_text()]
+    try:
+        google_sheets_append("Settings_Changes", [row])
+        return None
+    except Exception as exc:
+        app.logger.exception("Could not append settings change")
         return str(exc)
 
 
@@ -593,6 +637,8 @@ def gemini_generate_text(user_text):
     config = workspace_config()
     prompt = f"""
 Bạn là trợ lý marketing tiếng Việt cho ngành đồng phục, bảo hộ lao động, may mặc.
+Tone thương hiệu: {config["brand_tone"]}
+Ngữ cảnh campaign hiện tại: {config["campaign_context"]}
 Viết tự nhiên, rõ ràng, thực tế. Không dùng giọng quảng cáo quá đà.
 Nếu người dùng yêu cầu bài viết, hãy viết có tiêu đề, mở bài ngắn, các ý chính rõ ràng.
 Mọi bài post thương hiệu phải gắn CTA và footer chuẩn bên dưới, trừ khi người dùng nói rõ là không cần.
@@ -679,9 +725,11 @@ def viral_research_text(text):
 
 
 def image_prompt_from_text(text, draft_text=""):
+    config = workspace_config()
     return (
         "Tạo ảnh minh họa marketing cho ngành đồng phục, bảo hộ lao động, may mặc. "
-        "Phong cách ảnh thật, sạch, chuyên nghiệp, phù hợp đăng Facebook/LinkedIn. "
+        f"Phong cách ảnh: {config['image_style']} "
+        f"Ngữ cảnh campaign hiện tại: {config['campaign_context']} "
         "Không chèn chữ lên ảnh trừ khi người dùng yêu cầu rõ. "
         f"Yêu cầu: {text}\n\n"
         f"Nội dung bài viết liên quan:\n{draft_text[:1200]}"
@@ -698,6 +746,8 @@ def agent_manager_route(text):
     plain = strip_tone(text)
     if plain.startswith("confirm "):
         return "ads_operator"
+    if any(x in plain for x in ["doi cta", "cap nhat cta", "doi footer", "cap nhat footer", "doi style anh", "doi phong cach anh", "cap nhat style anh", "doi tone", "cap nhat tone", "campaign thang nay", "chien dich thang nay"]):
+        return "settings_agent"
     if any(x in plain for x in ["nghien cuu viral", "tim bai viral", "facebook viral", "bai viet viral"]):
         return "viral_researcher"
     if any(x in plain for x in ["phan tich cong thuc viral", "cong thuc viral", "hoc cach viet viral", "loc bai viral"]):
@@ -725,6 +775,55 @@ def agents_text():
     lines.append("Luồng xử lý: Telegram -> Agent Manager -> Agent con -> API/Composio/Meta/Gemini/OpenAI -> Telegram.")
     lines.append("Các hành động thật như đăng bài, dừng ads, bật ads vẫn cần CONFIRM.")
     return "\n".join(lines)
+
+
+def extract_setting_value(text):
+    patterns = [r":\s*(.+)$", r"thành\s+(.+)$", r"la\s+(.+)$", r"là\s+(.+)$"]
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
+        if match:
+            return match.group(1).strip()
+    return ""
+
+
+def settings_agent_handle(text):
+    plain = strip_tone(text)
+    value = extract_setting_value(text)
+    if not value:
+        return (
+            "Thiếu nội dung cấu hình.\n"
+            "Ví dụ:\n"
+            "- Đổi CTA thành: ...\n"
+            "- Đổi footer thành: ...\n"
+            "- Đổi style ảnh thành: ảnh thật trong xưởng, ánh sáng tự nhiên\n"
+            "- Campaign tháng này là: tập trung đồng phục bảo hộ mùa mưa"
+        )
+
+    if "cta" in plain:
+        key = "default_cta"
+        label = "CTA"
+    elif "footer" in plain:
+        key = "default_footer"
+        label = "footer"
+    elif any(x in plain for x in ["style anh", "phong cach anh", "prompt anh", "anh minh hoa"]):
+        key = "image_style"
+        label = "style ảnh"
+    elif any(x in plain for x in ["tone", "giong van", "van phong"]):
+        key = "brand_tone"
+        label = "tone thương hiệu"
+    elif any(x in plain for x in ["campaign", "chien dich", "thang nay", "mua nay", "dot nay"]):
+        key = "campaign_context"
+        label = "campaign context"
+    else:
+        key = "general_note"
+        label = "ghi chú cấu hình"
+
+    if key != "general_note":
+        RUNTIME_CONFIG[key] = value
+        save_state()
+
+    sheet_error = append_settings_change(key, value, note=f"Updated {label}")
+    return f"Đã cập nhật {label}.\n\nGiá trị mới:\n{value[:1500]}" + sheet_note(sheet_error)
 
 
 def add_pending(entity, entity_id, status):
@@ -777,6 +876,8 @@ def handle_text(text):
         if not prompt:
             return "Chưa có image prompt nào. Hãy nhắn: tạo ảnh minh họa cho bài này"
         return f"Image prompt hiện tại:\n{prompt[:2500]}"
+    if agent == "settings_agent":
+        return settings_agent_handle(text)
     if agent == "viral_researcher":
         return viral_research_text(text)
     if agent == "viral_formula_analyst":
@@ -1065,6 +1166,69 @@ def debug_content_test(secret):
         status="pending_manual_image",
     )
     return {"ok": error is None, "content_id": content_id, "error": error}, 200
+
+
+@app.get("/debug/setup-config-tabs/<secret>")
+def debug_setup_config_tabs(secret):
+    if secret != env("WEBHOOK_SECRET"):
+        abort(404)
+
+    results = []
+    specs = {
+        "Image_Styles": {
+            "headers": ["style_id", "name", "description", "prompt_rules", "negative_rules", "aspect_ratio", "status", "updated_at"],
+            "rows": [
+                [
+                    "img_default",
+                    "Ảnh thật chuyên nghiệp",
+                    "Dùng cho post Facebook/LinkedIn ngành đồng phục, bảo hộ lao động.",
+                    "Ảnh thật, sạch, ánh sáng tự nhiên, bối cảnh xưởng/văn phòng/công trình, sản phẩm rõ, không chèn chữ lên ảnh nếu không yêu cầu.",
+                    "Tránh chữ méo, logo sai, mặt người giả quá rõ, nền rối, màu quá sặc sỡ.",
+                    "1:1",
+                    "active",
+                    now_text(),
+                ]
+            ],
+        },
+        "Campaign_Context": {
+            "headers": ["context_id", "name", "date_from", "date_to", "priority_products", "target_audience", "main_message", "cta_override", "footer_override", "status", "updated_at"],
+            "rows": [
+                [
+                    "ctx_default",
+                    "Mặc định",
+                    "",
+                    "",
+                    "Đồng phục cao cấp, đồng phục bảo hộ, đồng phục doanh nghiệp",
+                    "Chủ doanh nghiệp, HR, admin, mua hàng, quản lý xưởng",
+                    "Đồng phục đúng chuẩn giúp đội ngũ chuyên nghiệp, an toàn, thoải mái hơn.",
+                    "",
+                    "",
+                    "active",
+                    now_text(),
+                ]
+            ],
+        },
+        "Settings_Changes": {
+            "headers": ["change_id", "setting_type", "value", "note", "source", "status", "updated_at"],
+            "rows": [],
+        },
+    }
+
+    for sheet_name, spec in specs.items():
+        try:
+            google_sheets_add_sheet(sheet_name)
+            results.append({"sheet": sheet_name, "created": True})
+        except Exception as exc:
+            results.append({"sheet": sheet_name, "created": False, "create_error": str(exc)[:200]})
+        try:
+            values = [spec["headers"]] + spec["rows"]
+            google_sheets_write(sheet_name, values, "A1")
+            results[-1]["written"] = True
+        except Exception as exc:
+            results[-1]["written"] = False
+            results[-1]["write_error"] = str(exc)[:300]
+
+    return {"ok": True, "results": results}, 200
 
 
 @app.post("/debug/handle/<secret>")
