@@ -180,11 +180,22 @@ def generate_image(prompt):
     return openai_generate_image(prompt)
 
 
+def composio_account_for_tool(tool_slug):
+    slug = (tool_slug or "").upper()
+    if slug.startswith("GOOGLESHEETS_") or slug.startswith("GOOGLESUPER_"):
+        return os.environ.get("COMPOSIO_GOOGLESHEETS_CONNECTED_ACCOUNT_ID") or os.environ.get("COMPOSIO_GOOGLE_CONNECTED_ACCOUNT_ID")
+    if slug.startswith("GOOGLEDRIVE_"):
+        return os.environ.get("COMPOSIO_GOOGLEDRIVE_CONNECTED_ACCOUNT_ID") or os.environ.get("COMPOSIO_GOOGLE_CONNECTED_ACCOUNT_ID")
+    if slug.startswith("LINKEDIN_"):
+        return os.environ.get("COMPOSIO_LINKEDIN_CONNECTED_ACCOUNT_ID")
+    return os.environ.get("COMPOSIO_CONNECTED_ACCOUNT_ID")
+
+
 def composio_execute(tool_slug, input_payload):
     api_key = env("COMPOSIO_API_KEY")
     user_id = os.environ.get("COMPOSIO_USER_ID", "user_rz7pm")
     body = {"arguments": input_payload, "user_id": user_id, "entity_id": user_id}
-    connected_account_id = os.environ.get("COMPOSIO_CONNECTED_ACCOUNT_ID")
+    connected_account_id = composio_account_for_tool(tool_slug)
     if connected_account_id:
         body["connected_account_id"] = connected_account_id
     res = requests.post(
@@ -196,6 +207,27 @@ def composio_execute(tool_slug, input_payload):
     if not res.ok:
         raise RuntimeError(res.text)
     return res.json()
+
+
+def composio_tool_schema(tool_slug):
+    api_key = env("COMPOSIO_API_KEY")
+    res = requests.get(
+        f"https://backend.composio.dev/api/v3/tools/{tool_slug}",
+        headers={"x-api-key": api_key},
+        timeout=30,
+    )
+    if not res.ok:
+        raise RuntimeError(res.text)
+    return res.json()
+
+
+def google_sheets_append(sheet_name, values):
+    payload = {
+        "spreadsheet_id": env("GOOGLE_SHEET_ID"),
+        "sheet_name": sheet_name,
+        "values": values,
+    }
+    return composio_execute("GOOGLESHEETS_BATCH_UPDATE", payload)
 
 
 def composio_upload_file(file_bytes, filename, mimetype, toolkit_slug, tool_slug):
@@ -849,6 +881,13 @@ def debug_composio_toolkit(secret):
     tool_items = tools_payload.get("items") or tools_payload.get("data") or []
     return {
         "toolkit": toolkit,
+        "configured_connected_account_id": (
+            os.environ.get("COMPOSIO_GOOGLESHEETS_CONNECTED_ACCOUNT_ID")
+            if toolkit == "googlesheets"
+            else os.environ.get("COMPOSIO_GOOGLEDRIVE_CONNECTED_ACCOUNT_ID")
+            if toolkit == "googledrive"
+            else ""
+        ),
         "accounts_ok": accounts_res.ok,
         "accounts_status": accounts_res.status_code,
         "active_accounts": [
@@ -873,6 +912,40 @@ def debug_composio_toolkit(secret):
             if isinstance(item, dict)
         ],
     }
+
+
+@app.get("/debug/composio-tool-schema/<secret>")
+def debug_composio_tool_schema(secret):
+    if secret != env("WEBHOOK_SECRET"):
+        abort(404)
+    tool_slug = request.args.get("tool", "GOOGLESHEETS_BATCH_UPDATE")
+    try:
+        payload = composio_tool_schema(tool_slug)
+        item = payload.get("data") or payload
+        return {
+            "tool": tool_slug,
+            "name": item.get("name"),
+            "slug": item.get("slug"),
+            "toolkit": ((item.get("toolkit") or {}).get("slug") or item.get("toolkit_slug")),
+            "input_parameters": item.get("input_parameters"),
+        }, 200
+    except Exception as exc:
+        return {"ok": False, "tool": tool_slug, "error": str(exc)}, 200
+
+
+@app.get("/debug/sheets-test/<secret>")
+def debug_sheets_test(secret):
+    if secret != env("WEBHOOK_SECRET"):
+        abort(404)
+    try:
+        now = time.strftime("%Y-%m-%d %H:%M:%S")
+        result = google_sheets_append(
+            "Learnings",
+            [[f"test_{int(time.time())}", "system", "Composio Google Sheets test", "Bot can write to Sheet", "high", "active", now]],
+        )
+        return {"ok": True, "result": result}, 200
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}, 200
 
 
 @app.get("/debug/openai/<secret>")
@@ -924,7 +997,7 @@ def debug_workspace(secret):
         "has_default_cta": bool(config["default_cta"]),
         "has_default_footer": bool(config["default_footer"]),
         "state_file": state_file(),
-        "sheet_runtime_auth": "not_configured",
+        "sheet_runtime_auth": "composio" if os.environ.get("COMPOSIO_GOOGLESHEETS_CONNECTED_ACCOUNT_ID") else "not_configured",
     }
 
 

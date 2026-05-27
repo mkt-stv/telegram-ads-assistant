@@ -45,6 +45,8 @@ services:
         sync: false
       - key: COMPOSIO_CONNECTED_ACCOUNT_ID
         sync: false
+      - key: COMPOSIO_GOOGLESHEETS_CONNECTED_ACCOUNT_ID
+        sync: false
       - key: COMPOSIO_USER_ID
         value: user_rz7pm
       - key: COMPOSIO_FACEBOOK_PAGE_ID
