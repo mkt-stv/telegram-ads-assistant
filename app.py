@@ -41,15 +41,15 @@ def send_telegram(text):
     ).raise_for_status()
 
 
-def composio_execute(action_id, input_payload):
+def composio_execute(tool_slug, input_payload):
     api_key = env("COMPOSIO_API_KEY")
-    body = {"input": input_payload}
+    user_id = os.environ.get("COMPOSIO_USER_ID", "user_rz7pm")
+    body = {"arguments": input_payload, "user_id": user_id, "entity_id": user_id}
     connected_account_id = os.environ.get("COMPOSIO_CONNECTED_ACCOUNT_ID")
     if connected_account_id:
-        body["connectedAccountId"] = connected_account_id
         body["connected_account_id"] = connected_account_id
     res = requests.post(
-        f"https://backend.composio.dev/api/v2/actions/{action_id}/execute",
+        f"https://backend.composio.dev/api/v3.1/tools/execute/{tool_slug}",
         headers={"x-api-key": api_key, "Content-Type": "application/json"},
         json=body,
         timeout=45,
@@ -63,7 +63,11 @@ def post_to_social(platform, text):
     platform_key = strip_tone(platform).upper()
     if "FACEBOOK" in platform_key:
         action_id = env("COMPOSIO_FACEBOOK_POST_ACTION_ID")
-        default_payload = {"message": text}
+        default_payload = {
+            "page_id": env("COMPOSIO_FACEBOOK_PAGE_ID"),
+            "message": text,
+            "published": True,
+        }
         payload_json = os.environ.get("COMPOSIO_FACEBOOK_POST_INPUT_JSON")
     elif "INSTAGRAM" in platform_key:
         action_id = env("COMPOSIO_INSTAGRAM_POST_ACTION_ID")
@@ -478,6 +482,8 @@ def debug_composio(secret):
     status = {
         "has_api_key": bool(os.environ.get("COMPOSIO_API_KEY")),
         "has_connected_account_id": bool(os.environ.get("COMPOSIO_CONNECTED_ACCOUNT_ID")),
+        "user_id": os.environ.get("COMPOSIO_USER_ID", ""),
+        "facebook_page_id": os.environ.get("COMPOSIO_FACEBOOK_PAGE_ID", ""),
         "facebook_action_id": os.environ.get("COMPOSIO_FACEBOOK_POST_ACTION_ID", ""),
         "instagram_action_id": os.environ.get("COMPOSIO_INSTAGRAM_POST_ACTION_ID", ""),
     }
