@@ -254,6 +254,8 @@ def limit_words(text, max_words=8):
 
 
 def image_hook_from_draft(draft_text, fallback="Đồng phục chuẩn, doanh nghiệp chuyên nghiệp"):
+    if is_generation_error(draft_text):
+        return limit_words(fallback, 8)
     for line in (draft_text or "").splitlines():
         cleaned = compact_spaces(line).strip("-•# ")
         if cleaned and len(cleaned) >= 8:
@@ -282,6 +284,11 @@ def clean_generated_post(text):
         hook = compact_spaces(match.group(2))
         text = text[: match.start(2)] + limit_words(hook, 16) + text[match.end(2) :]
     return text
+
+
+def is_generation_error(text):
+    plain = strip_tone(text or "")
+    return plain.startswith(("gemini hien khong kha dung", "chua co gemini_api_key", "loi khi tao noi dung"))
 
 
 def strip_tone(text):
@@ -1167,8 +1174,12 @@ def handle_text(text):
     if agent == "image_creator":
         draft = normalize_draft(LAST_DRAFT.get(chat_key))
         draft_text = draft.get("text", "")
+        if is_generation_error(draft_text):
+            draft_text = ""
         if any(x in plain for x in ["tao bai", "viet bai", "tao noi dung", "viet noi dung", "caption", "content"]) and not draft_text:
             draft_text = gemini_generate_text(text)
+            if is_generation_error(draft_text):
+                draft_text = ""
         image_prompt = image_prompt_from_text(text, draft_text)
         try:
             image_b64 = create_image_for_draft(text, draft_text)
@@ -1214,6 +1225,8 @@ def handle_text(text):
         return report_text(text)
     if any(x in plain for x in ["tao cho toi", "viet cho toi", "viet bai", "tao bai", "tao noi dung", "viet noi dung", "caption", "content"]):
         draft = gemini_generate_text(text)
+        if is_generation_error(draft):
+            return draft
         content_id, sheet_error = append_content_record(topic=text, draft_text=draft)
         LAST_DRAFT[chat_key] = {"text": draft, "content_id": content_id}
         save_state()
@@ -1268,6 +1281,8 @@ def handle_text(text):
             return help_text()
         if intent.get("intent") == "content":
             draft = gemini_generate_text(text)
+            if is_generation_error(draft):
+                return draft
             content_id, sheet_error = append_content_record(topic=text, draft_text=draft)
             LAST_DRAFT[chat_key] = {"text": draft, "content_id": content_id}
             save_state()
