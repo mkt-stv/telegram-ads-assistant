@@ -1067,6 +1067,20 @@ def debug_content_test(secret):
     return {"ok": error is None, "content_id": content_id, "error": error}, 200
 
 
+@app.post("/debug/handle/<secret>")
+def debug_handle(secret):
+    if secret != env("WEBHOOK_SECRET"):
+        abort(404)
+    payload = request.get_json(force=True, silent=True) or {}
+    text = payload.get("text", "")
+    if not text:
+        return {"ok": False, "error": "missing text"}, 200
+    try:
+        return {"ok": True, "reply": handle_text(text)}, 200
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}, 200
+
+
 @app.get("/debug/openai/<secret>")
 def debug_openai(secret):
     if secret != env("WEBHOOK_SECRET"):
