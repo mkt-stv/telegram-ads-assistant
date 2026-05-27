@@ -36,15 +36,7 @@ services:
       - key: DEFAULT_CTA
         value: 'Chỉ cần bình luận "QUAN TÂM", Sư Tử Vàng sẽ hỗ trợ bạn tạo mẫu đồng phục theo thiết kế riêng miễn phí, tối ưu theo môi trường làm việc thực tế cho doanh nghiệp, giúp đội ngũ mặc chuyên nghiệp, an toàn, thoải mái hơn và nâng cao hình ảnh thương hiệu.'
       - key: DEFAULT_FOOTER
-        value: |-
-          -----------------------------------------
-          ĐỒNG PHỤC CAO CẤP SƯ TỬ VÀNG
-          Địa chỉ: 81 Trần Mai Ninh, P. Bảy Hiền, (Quận Tân Bình cũ), TP.HCM
-          Website: dongphucsutuvang.com
-          Hotline: 091 111 4866
-          -----------------------------------------
-          #SuTuVang #DongPhucCaoCap #Vanhoadoanhnghiep
-          #Hinhanhthuonghieu #maydongphuc #dongphucchatluong #GoldenLion #PremiumWorkwear #DongPhucDoanhNghiep #KienTaoThuongHieu #DongPhucCaoCap
+        value: '-----------------------------------------\nĐỒNG PHỤC CAO CẤP SƯ TỬ VÀNG\nĐịa chỉ: 81 Trần Mai Ninh, P. Bảy Hiền, (Quận Tân Bình cũ), TP.HCM\nWebsite: dongphucsutuvang.com\nHotline: 091 111 4866\n-----------------------------------------\n#SuTuVang #DongPhucCaoCap #Vanhoadoanhnghiep\n#Hinhanhthuonghieu #maydongphuc #dongphucchatluong #GoldenLion #PremiumWorkwear #DongPhucDoanhNghiep #KienTaoThuongHieu #DongPhucCaoCap'
       - key: COMPOSIO_API_KEY
         sync: false
       - key: COMPOSIO_CONNECTED_ACCOUNT_ID

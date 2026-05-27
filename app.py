@@ -52,8 +52,8 @@ def workspace_config():
         "drive_folder_id": os.environ.get("GOOGLE_DRIVE_FOLDER_ID", ""),
         "sheet_id": os.environ.get("GOOGLE_SHEET_ID", ""),
         "media_folder_id": os.environ.get("GOOGLE_MEDIA_FOLDER_ID", ""),
-        "default_cta": os.environ.get("DEFAULT_CTA", ""),
-        "default_footer": os.environ.get("DEFAULT_FOOTER", ""),
+        "default_cta": os.environ.get("DEFAULT_CTA", "").replace("\\n", "\n"),
+        "default_footer": os.environ.get("DEFAULT_FOOTER", "").replace("\\n", "\n"),
     }
 
 
