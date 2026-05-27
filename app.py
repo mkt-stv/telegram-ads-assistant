@@ -183,7 +183,11 @@ def generate_image(prompt):
 def composio_account_for_tool(tool_slug):
     slug = (tool_slug or "").upper()
     if slug.startswith("GOOGLESHEETS_") or slug.startswith("GOOGLESUPER_"):
-        return os.environ.get("COMPOSIO_GOOGLESHEETS_CONNECTED_ACCOUNT_ID") or os.environ.get("COMPOSIO_GOOGLE_CONNECTED_ACCOUNT_ID")
+        return (
+            os.environ.get("COMPOSIO_GOOGLESHEETS_CONNECTED_ACCOUNT_ID")
+            or os.environ.get("COMPOSIO_GOOGLE_CONNECTED_ACCOUNT_ID")
+            or "ca_L610ErQ5oEIz"
+        )
     if slug.startswith("GOOGLEDRIVE_"):
         return os.environ.get("COMPOSIO_GOOGLEDRIVE_CONNECTED_ACCOUNT_ID") or os.environ.get("COMPOSIO_GOOGLE_CONNECTED_ACCOUNT_ID")
     if slug.startswith("LINKEDIN_"):
