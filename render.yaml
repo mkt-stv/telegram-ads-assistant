@@ -27,6 +27,10 @@ services:
         value: gpt-image-1.5
       - key: OPENAI_IMAGE_SIZE
         value: 1024x1024
+      - key: IMAGE_PROVIDER
+        value: openai
+      - key: GEMINI_IMAGE_MODEL
+        value: gemini-2.5-flash-image
       - key: GOOGLE_DRIVE_FOLDER_ID
         value: 11T-9iJ-Q7WL6SnKXZ7cPzGw1FjTmPEeV
       - key: GOOGLE_SHEET_ID

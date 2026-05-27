@@ -47,6 +47,14 @@ def openai_image_model():
     return os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1.5")
 
 
+def gemini_image_model():
+    return os.environ.get("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image")
+
+
+def image_provider():
+    return os.environ.get("IMAGE_PROVIDER", "openai").lower()
+
+
 def workspace_config():
     return {
         "drive_folder_id": os.environ.get("GOOGLE_DRIVE_FOLDER_ID", ""),
@@ -140,6 +148,36 @@ def openai_generate_image(prompt):
         img.raise_for_status()
         return img.content
     raise RuntimeError("OpenAI image response did not include image data.")
+
+
+def gemini_generate_image(prompt):
+    key = env("GEMINI_API_KEY")
+    model = gemini_image_model()
+    res = requests.post(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}",
+        headers={"Content-Type": "application/json"},
+        json={
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
+        },
+        timeout=120,
+    )
+    if not res.ok:
+        raise RuntimeError(res.text[:1000])
+    payload = res.json()
+    for candidate in payload.get("candidates", []):
+        content = candidate.get("content") or {}
+        for part in content.get("parts", []):
+            inline_data = part.get("inlineData") or part.get("inline_data")
+            if inline_data and inline_data.get("data"):
+                return base64.b64decode(inline_data["data"])
+    raise RuntimeError("Gemini image response did not include image data.")
+
+
+def generate_image(prompt):
+    if image_provider() == "gemini":
+        return gemini_generate_image(prompt)
+    return openai_generate_image(prompt)
 
 
 def composio_execute(tool_slug, input_payload):
@@ -554,7 +592,7 @@ def image_prompt_from_text(text, draft_text=""):
 
 
 def create_image_for_draft(user_text, draft_text=""):
-    image_bytes = openai_generate_image(image_prompt_from_text(user_text, draft_text))
+    image_bytes = generate_image(image_prompt_from_text(user_text, draft_text))
     send_telegram_photo(image_bytes, "Ảnh minh họa đã tạo. Nếu muốn đăng kèm bài gần nhất, nhắn: đăng bài này lên Facebook")
     return base64.b64encode(image_bytes).decode("ascii")
 
@@ -779,6 +817,64 @@ def debug_composio(secret):
     return status
 
 
+@app.get("/debug/composio-toolkit/<secret>")
+def debug_composio_toolkit(secret):
+    if secret != env("WEBHOOK_SECRET"):
+        abort(404)
+    api_key = env("COMPOSIO_API_KEY")
+    toolkit = request.args.get("toolkit", "googlesheets")
+    search = request.args.get("search", toolkit)
+    headers = {"x-api-key": api_key}
+
+    accounts_url = (
+        "https://backend.composio.dev/api/v3/connected_accounts"
+        f"?toolkit_slugs={toolkit}&statuses=ACTIVE"
+    )
+    tools_url = (
+        "https://backend.composio.dev/api/v3/tools"
+        f"?search={requests.utils.quote(search)}&limit=20"
+    )
+    accounts_res = requests.get(accounts_url, headers=headers, timeout=30)
+    tools_res = requests.get(tools_url, headers=headers, timeout=30)
+
+    def safe_json(res):
+        try:
+            return res.json()
+        except Exception:
+            return {"raw": res.text[:1000]}
+
+    accounts_payload = safe_json(accounts_res)
+    tools_payload = safe_json(tools_res)
+    account_items = accounts_payload.get("items") or accounts_payload.get("data") or []
+    tool_items = tools_payload.get("items") or tools_payload.get("data") or []
+    return {
+        "toolkit": toolkit,
+        "accounts_ok": accounts_res.ok,
+        "accounts_status": accounts_res.status_code,
+        "active_accounts": [
+            {
+                "id": item.get("id"),
+                "status": item.get("status"),
+                "toolkit": ((item.get("toolkit") or {}).get("slug") or item.get("toolkit_slug")),
+                "created_at": item.get("created_at"),
+            }
+            for item in account_items[:10]
+            if isinstance(item, dict)
+        ],
+        "tools_ok": tools_res.ok,
+        "tools_status": tools_res.status_code,
+        "tools": [
+            {
+                "slug": item.get("slug"),
+                "name": item.get("name"),
+                "toolkit": ((item.get("toolkit") or {}).get("slug") or item.get("toolkit_slug")),
+            }
+            for item in tool_items[:20]
+            if isinstance(item, dict)
+        ],
+    }
+
+
 @app.get("/debug/openai/<secret>")
 def debug_openai(secret):
     if secret != env("WEBHOOK_SECRET"):
@@ -787,7 +883,33 @@ def debug_openai(secret):
         "has_api_key": bool(os.environ.get("OPENAI_API_KEY")),
         "image_model": openai_image_model(),
         "image_size": os.environ.get("OPENAI_IMAGE_SIZE", "1024x1024"),
+        "image_provider": image_provider(),
     }
+
+
+@app.get("/debug/gemini-image/<secret>")
+def debug_gemini_image(secret):
+    if secret != env("WEBHOOK_SECRET"):
+        abort(404)
+    model = request.args.get("model") or gemini_image_model()
+    prompt = request.args.get("prompt") or "Create a simple product photo of a yellow work safety uniform on a clean white background."
+    old_model = os.environ.get("GEMINI_IMAGE_MODEL")
+    os.environ["GEMINI_IMAGE_MODEL"] = model
+    try:
+        image_bytes = gemini_generate_image(prompt)
+        return {
+            "ok": True,
+            "model": model,
+            "bytes": len(image_bytes),
+            "mime_guess": "image/png_or_jpeg",
+        }, 200
+    except Exception as exc:
+        return {"ok": False, "model": model, "error": str(exc)}, 200
+    finally:
+        if old_model is None:
+            os.environ.pop("GEMINI_IMAGE_MODEL", None)
+        else:
+            os.environ["GEMINI_IMAGE_MODEL"] = old_model
 
 
 @app.get("/debug/workspace/<secret>")
