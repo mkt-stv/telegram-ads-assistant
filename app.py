@@ -870,10 +870,11 @@ Viết tự nhiên, rõ ràng, thực tế. Không dùng giọng quảng cáo qu
 Nếu người dùng yêu cầu bài viết, trả lời đúng cấu trúc này:
 
 HOOK:
-Một câu mở đầu mạnh, ngắn, có dấu tiếng Việt đầy đủ.
+Một câu mở đầu mạnh, tối đa 16 từ, có dấu tiếng Việt đầy đủ.
 
 NỘI DUNG:
-Viết phần nội dung chính. Có thể dùng bullet ngắn nếu phù hợp. Không dùng markdown trang trí.
+Viết phần nội dung chính, ngắn gọn, có chiều sâu thực tế. Có thể dùng bullet ngắn nếu phù hợp.
+Không dùng markdown, không dùng dấu **, không in đậm, không gạch đầu dòng quá dài.
 
 CTA:
 Dùng đúng CTA chuẩn bên dưới, không tự đổi ý.
@@ -881,7 +882,7 @@ Dùng đúng CTA chuẩn bên dưới, không tự đổi ý.
 FOOTER:
 Dùng đúng footer chuẩn bên dưới, không tự đổi ý.
 
-Giữ độ dài vừa phải để gửi Telegram. Không thêm hashtag ngoài phần footer.
+Giữ độ dài vừa phải để gửi Telegram. Không thêm hashtag ngoài phần footer. Tránh cấu trúc "không chỉ... mà còn".
 
 CTA chuẩn:
 {config["default_cta"]}
