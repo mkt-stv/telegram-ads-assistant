@@ -195,9 +195,16 @@ def composio_account_for_tool(tool_slug):
     return os.environ.get("COMPOSIO_CONNECTED_ACCOUNT_ID")
 
 
+def composio_user_for_tool(tool_slug):
+    slug = (tool_slug or "").upper()
+    if slug.startswith("GOOGLESHEETS_") or slug.startswith("GOOGLESUPER_"):
+        return os.environ.get("COMPOSIO_GOOGLESHEETS_USER_ID", "pg-test-58e161a6-b048-4f5e-b81c-b660fa24086a")
+    return os.environ.get("COMPOSIO_USER_ID", "user_rz7pm")
+
+
 def composio_execute(tool_slug, input_payload):
     api_key = env("COMPOSIO_API_KEY")
-    user_id = os.environ.get("COMPOSIO_USER_ID", "user_rz7pm")
+    user_id = composio_user_for_tool(tool_slug)
     body = {"arguments": input_payload, "user_id": user_id, "entity_id": user_id}
     connected_account_id = composio_account_for_tool(tool_slug)
     if connected_account_id:
