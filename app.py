@@ -1052,6 +1052,21 @@ def debug_sheets_test(secret):
         return {"ok": False, "error": str(exc)}, 200
 
 
+@app.get("/debug/content-test/<secret>")
+def debug_content_test(secret):
+    if secret != env("WEBHOOK_SECRET"):
+        abort(404)
+    image_prompt = image_prompt_from_text("debug manual image fallback", "Debug draft")
+    content_id, error = append_content_record(
+        topic="debug manual image fallback",
+        draft_text="Debug draft",
+        image_prompt=image_prompt,
+        stage="image_pending",
+        status="pending_manual_image",
+    )
+    return {"ok": error is None, "content_id": content_id, "error": error}, 200
+
+
 @app.get("/debug/openai/<secret>")
 def debug_openai(secret):
     if secret != env("WEBHOOK_SECRET"):
