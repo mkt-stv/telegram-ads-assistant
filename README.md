@@ -66,3 +66,5 @@ Mutating commands require `CONFIRM`.
 - `tạo bài viết về ... kèm ảnh`
 - `đăng bài này lên Facebook`
 - `đăng bài này lên LinkedIn`
+- `nghiên cứu viral Facebook`
+- `phân tích công thức viral: <nội dung/link bài viết>`

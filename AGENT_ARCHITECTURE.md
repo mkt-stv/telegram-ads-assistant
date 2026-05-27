@@ -19,9 +19,41 @@ Telegram
 - `ads_report`: reports, best ads, weak campaigns, optimization suggestions.
 - `ads_operator`: pauses/resumes campaign, ad set, or ad after CONFIRM.
 - `content_writer`: creates Vietnamese posts and captions with Gemini.
+- `viral_researcher`: collects viral Facebook post candidates from configured sources, links, copied text, Pages, or later a scheduled data source.
+- `research_filter`: scores and filters research data before analysis. It removes noisy posts, duplicates, weak engagement, unrelated industries, and suspicious seeding.
+- `viral_formula_analyst`: turns filtered examples into reusable writing formulas for hooks, structure, proof, emotional angle, and CTA.
 - `image_creator`: creates illustration images with OpenAI Images API.
 - `social_publisher`: posts text or text+image to Facebook/LinkedIn via Composio after CONFIRM.
 - `memory_scheduler`: stores the latest draft now; later will own style memory, schedule, and database.
+
+## Viral Research Flow
+
+This should be a three-agent chain, not a direct researcher -> writer path.
+
+```text
+viral_researcher
+  -> research_filter
+  -> viral_formula_analyst
+  -> content_writer
+```
+
+Reason: raw viral data is noisy. A post can look viral because of ads, giveaway mechanics, controversy, celebrity effect, Page size, or seeding. The filter agent protects the writing agent from learning the wrong pattern.
+
+Recommended scoring fields:
+
+- Relevance to uniform, workwear, PPE, textile, B2B buying, HR/admin, factory, restaurant, hotel, school, or company uniforms.
+- Engagement quality: comments with buying intent count higher than likes.
+- Hook clarity: first 1-2 lines must create a reason to continue reading.
+- Structure: easy to reuse without copying.
+- Trust signals: real use case, comparison, checklist, before/after, price logic, material explanation.
+- Risk flags: giveaway bait, outrage bait, unrelated trend, copied meme, fake urgency, low-context viral content.
+
+Current bot supports:
+
+- `nghiên cứu viral Facebook`
+- `phân tích công thức viral: <paste nội dung/link/ghi chú bài viết>`
+
+Later automation should add a database table for collected posts, source Page, engagement, filter score, extracted formula, and generated draft.
 
 ## Current Image Plan
 

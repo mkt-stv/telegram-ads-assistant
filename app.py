@@ -23,6 +23,9 @@ AGENT_CATALOG = {
     "ads_report": "Lấy báo cáo, phân tích ads, đề xuất tối ưu từ Meta Ads.",
     "ads_operator": "Dừng, bật lại campaign/adset/ad sau khi người dùng CONFIRM.",
     "content_writer": "Viết bài, caption, nội dung quảng cáo bằng Gemini.",
+    "viral_researcher": "Thu thập bài viết viral từ Facebook/nguồn đầu vào theo ngành, chủ đề, Page hoặc link.",
+    "research_filter": "Lọc dữ liệu nghiên cứu: bỏ bài kém liên quan, số liệu yếu, trùng lặp, seeding hoặc lệch ngành.",
+    "viral_formula_analyst": "Phân tích bài đã lọc để rút công thức hook, bố cục, góc nhìn, CTA cho content_writer học theo.",
     "image_creator": "Tạo ảnh minh họa bằng OpenAI Images API.",
     "social_publisher": "Đăng bài/ảnh lên Facebook, LinkedIn qua Composio sau khi CONFIRM.",
     "memory_scheduler": "Lưu draft, phong cách viết, lịch đăng. Hiện là bản nền, chưa có DB ngoài.",
@@ -467,6 +470,62 @@ Yêu cầu của người dùng:
         return f"Lỗi khi tạo nội dung: {exc}"
 
 
+def gemini_analyze_viral_formula(user_text):
+    key = os.environ.get("GEMINI_API_KEY")
+    if not key:
+        return "Chưa có GEMINI_API_KEY nên chưa phân tích công thức viral được."
+    prompt = f"""
+Bạn là Viral Formula Analyst cho ngành đồng phục, bảo hộ lao động, may mặc.
+Nhiệm vụ:
+1. Đọc dữ liệu/bài viết người dùng đưa.
+2. Lọc bỏ phần nhiễu: bài không cùng ngành, thiếu ngữ cảnh, seeding, số liệu không đáng tin.
+3. Rút ra công thức viết có thể dùng lại cho content_writer.
+4. Không sao chép nguyên văn bài gốc.
+5. Trả lời bằng tiếng Việt rõ ràng.
+
+Cấu trúc trả lời:
+- Bài/ý nào nên giữ
+- Bài/ý nào nên loại
+- Mẫu hook
+- Bố cục nội dung
+- Cách tạo niềm tin
+- CTA phù hợp
+- Công thức viết lại cho ngành đồng phục/bảo hộ
+- 3 đề bài content nên viết tiếp
+
+Dữ liệu đầu vào:
+{user_text}
+"""
+    try:
+        res = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{gemini_model()}:generateContent?key={key}",
+            json={"contents": [{"parts": [{"text": prompt}]}]},
+            timeout=45,
+        )
+        if not res.ok:
+            app.logger.warning("Gemini viral analysis failed: %s", res.text[:500])
+            return "Gemini hiện không khả dụng hoặc đã hết quota. Chưa phân tích công thức viral được lúc này."
+        return res.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+    except Exception as exc:
+        app.logger.exception("Gemini viral formula analysis failed")
+        return f"Lỗi khi phân tích công thức viral: {exc}"
+
+
+def viral_research_text(text):
+    return (
+        "Luồng nghiên cứu viral đã sẵn sàng, nhưng bot hiện chưa có nguồn Facebook public ổn định để tự quét toàn Facebook.\n\n"
+        "Cách dùng hiện tại:\n"
+        "1. Gửi link hoặc copy nội dung các bài bạn thấy viral.\n"
+        "2. Nhắn: phân tích công thức viral: <dữ liệu bài viết>\n"
+        "3. Bot sẽ giao cho research_filter lọc trước, rồi viral_formula_analyst rút công thức cho content_writer.\n\n"
+        "Cách tự động hóa sau này:\n"
+        "- Kết nối thêm nguồn dữ liệu qua Composio/Facebook Page/Google Sheet.\n"
+        "- Lưu danh sách Page đối thủ hoặc Page ngành.\n"
+        "- Chạy lịch nghiên cứu hằng ngày/tuần.\n"
+        "- Chỉ đưa bài đạt điểm chất lượng sang Agent phân tích."
+    )
+
+
 def image_prompt_from_text(text, draft_text=""):
     return (
         "Tạo ảnh minh họa marketing cho ngành đồng phục, bảo hộ lao động, may mặc. "
@@ -487,6 +546,10 @@ def agent_manager_route(text):
     plain = strip_tone(text)
     if plain.startswith("confirm "):
         return "ads_operator"
+    if any(x in plain for x in ["nghien cuu viral", "tim bai viral", "facebook viral", "bai viet viral"]):
+        return "viral_researcher"
+    if any(x in plain for x in ["phan tich cong thuc viral", "cong thuc viral", "hoc cach viet viral", "loc bai viral"]):
+        return "viral_formula_analyst"
     if any(x in plain for x in ["tao anh", "anh minh hoa", "hinh minh hoa", "kem anh", "co anh"]):
         return "image_creator"
     if any(x in plain for x in ["dang bai", "post bai", "up bai", "dang len facebook", "dang len linkedin"]):
@@ -556,6 +619,10 @@ def handle_text(text):
     if plain in ["/cancel", "huy", "cancel"]:
         PENDING.clear()
         return "Đã hủy các lệnh đang chờ xác nhận."
+    if agent == "viral_researcher":
+        return viral_research_text(text)
+    if agent == "viral_formula_analyst":
+        return gemini_analyze_viral_formula(text)
     if agent == "image_creator":
         draft = normalize_draft(LAST_DRAFT.get(chat_key))
         draft_text = draft.get("text", "")
