@@ -1609,6 +1609,28 @@ def debug_logo(secret):
     return result, 200
 
 
+@app.get("/debug/logo-overlay-test/<secret>")
+def debug_logo_overlay_test(secret):
+    if secret != env("WEBHOOK_SECRET"):
+        abort(404)
+    base = Image.new("RGB", (1080, 1350), (28, 28, 28))
+    draw = ImageDraw.Draw(base)
+    draw.rectangle([0, 0, 1080, 260], fill=(245, 245, 245))
+    draw.rectangle([0, 260, 1080, 1350], fill=(32, 32, 32))
+    draw.rectangle([70, 930, 1010, 1260], outline=(212, 168, 72), width=8)
+    draw.text((90, 960), "Khu vực ảnh mẫu 4:5", fill=(255, 255, 255))
+    raw = io.BytesIO()
+    base.save(raw, format="PNG")
+    image_bytes = apply_brand_logo_overlay(raw.getvalue())
+    return {
+        "ok": True,
+        "has_brand_logo_url": bool(workspace_config().get("brand_logo_url")),
+        "input_bytes": len(raw.getvalue()),
+        "output_bytes": len(image_bytes),
+        "note": "Nếu output_bytes > input_bytes và không có lỗi log, lớp đóng logo đã chạy.",
+    }, 200
+
+
 @app.get("/debug/gemini-image/<secret>")
 def debug_gemini_image(secret):
     if secret != env("WEBHOOK_SECRET"):
