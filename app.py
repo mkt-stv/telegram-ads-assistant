@@ -10,6 +10,7 @@ import unicodedata
 from datetime import date, timedelta
 
 import requests
+from PIL import Image, ImageDraw
 from flask import Flask, abort, request
 
 app = Flask(__name__)
@@ -78,6 +79,7 @@ def workspace_config():
             "DEFAULT_BRAND_TONE",
             "Rõ ràng, đáng tin, thực tế, không phóng đại.",
         ),
+        "brand_logo_url": RUNTIME_CONFIG.get("brand_logo_url") or os.environ.get("BRAND_LOGO_URL", ""),
         "campaign_context": RUNTIME_CONFIG.get("campaign_context", ""),
     }
 
@@ -299,6 +301,67 @@ def send_telegram_photo(image_bytes, caption=""):
     ).raise_for_status()
 
 
+def google_drive_download_url(url):
+    if not url:
+        return ""
+    patterns = [
+        r"/file/d/([a-zA-Z0-9_-]+)",
+        r"[?&]id=([a-zA-Z0-9_-]+)",
+        r"/d/([a-zA-Z0-9_-]+)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return f"https://drive.google.com/uc?export=download&id={match.group(1)}"
+    return url
+
+
+def download_brand_logo():
+    logo_url = workspace_config().get("brand_logo_url", "").strip()
+    if not logo_url:
+        return None
+    res = requests.get(google_drive_download_url(logo_url), timeout=45)
+    res.raise_for_status()
+    return res.content
+
+
+def apply_brand_logo_overlay(image_bytes):
+    try:
+        logo_bytes = download_brand_logo()
+        if not logo_bytes:
+            return image_bytes
+
+        base = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
+        logo = Image.open(io.BytesIO(logo_bytes)).convert("RGBA")
+        base_w, base_h = base.size
+        max_logo_w = max(120, int(base_w * 0.18))
+        if logo.width > max_logo_w:
+            ratio = max_logo_w / logo.width
+            logo = logo.resize((max_logo_w, max(1, int(logo.height * ratio))), Image.LANCZOS)
+
+        margin = max(28, int(base_w * 0.04))
+        pad = max(12, int(base_w * 0.014))
+        x = base_w - logo.width - margin
+        y = margin
+
+        plate = Image.new("RGBA", base.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(plate)
+        draw.rounded_rectangle(
+            [x - pad, y - pad, x + logo.width + pad, y + logo.height + pad],
+            radius=max(12, pad),
+            fill=(255, 255, 255, 218),
+        )
+        base = Image.alpha_composite(base, plate)
+        base.alpha_composite(logo, (x, y))
+
+        out = io.BytesIO()
+        base.convert("RGB").save(out, format="PNG", optimize=True)
+        return out.getvalue()
+    except Exception:
+        app.logger.exception("Could not apply brand logo overlay")
+        return image_bytes
+
+
 def openai_generate_image(prompt):
     api_key = env("OPENAI_API_KEY")
     res = requests.post(
@@ -350,8 +413,10 @@ def gemini_generate_image(prompt):
 
 def generate_image(prompt):
     if image_provider() == "gemini":
-        return gemini_generate_image(prompt)
-    return openai_generate_image(prompt)
+        image_bytes = gemini_generate_image(prompt)
+    else:
+        image_bytes = openai_generate_image(prompt)
+    return apply_brand_logo_overlay(image_bytes)
 
 
 def composio_account_for_tool(tool_slug):
@@ -801,10 +866,22 @@ def gemini_generate_text(user_text):
 Bạn là trợ lý marketing tiếng Việt cho ngành đồng phục, bảo hộ lao động, may mặc.
 Tone thương hiệu: {config["brand_tone"]}
 Ngữ cảnh campaign hiện tại: {config["campaign_context"]}
-Viết tự nhiên, rõ ràng, thực tế. Không dùng giọng quảng cáo quá đà.
-Nếu người dùng yêu cầu bài viết, hãy viết có tiêu đề, mở bài ngắn, các ý chính rõ ràng.
-Mọi bài post thương hiệu phải gắn CTA và footer chuẩn bên dưới, trừ khi người dùng nói rõ là không cần.
-Giữ độ dài vừa phải để gửi Telegram.
+Viết tự nhiên, rõ ràng, thực tế. Không dùng giọng quảng cáo quá đà. Không bịa số liệu, chứng nhận, khách hàng, dự án nếu người dùng không cung cấp.
+Nếu người dùng yêu cầu bài viết, trả lời đúng cấu trúc này:
+
+HOOK:
+Một câu mở đầu mạnh, ngắn, có dấu tiếng Việt đầy đủ.
+
+NỘI DUNG:
+Viết phần nội dung chính. Có thể dùng bullet ngắn nếu phù hợp. Không dùng markdown trang trí.
+
+CTA:
+Dùng đúng CTA chuẩn bên dưới, không tự đổi ý.
+
+FOOTER:
+Dùng đúng footer chuẩn bên dưới, không tự đổi ý.
+
+Giữ độ dài vừa phải để gửi Telegram. Không thêm hashtag ngoài phần footer.
 
 CTA chuẩn:
 {config["default_cta"]}
@@ -904,8 +981,10 @@ def image_prompt_from_text(text, draft_text=""):
         "- Không nhồi nhiều chữ lên ảnh.\n"
         "- Chỉ đặt một câu Tiêu đề/HOOK ngắn bằng tiếng Việt trên ảnh, dễ đọc, không quá 8 từ.\n"
         f"- Câu Tiêu đề/HOOK trên ảnh: \"{hook}\"\n"
+        "- Chừa vùng trống sạch ở góc trên bên phải để hệ thống đóng logo thật của Sư Tử Vàng sau khi tạo ảnh.\n"
         "- Không thêm CTA, số điện thoại, website, hashtag, đoạn văn dài hoặc chữ nhỏ trên ảnh.\n"
-        "- Không tự vẽ sai logo. Nếu cần gợi thương hiệu, chỉ dùng tone vàng kim, đen, trắng và cảm giác cao cấp.\n\n"
+        "- Không tự vẽ logo, không tạo logo giả, không viết tên thương hiệu thành logo. Logo thật sẽ được hệ thống đóng lên ảnh sau.\n"
+        "- Nếu cần gợi thương hiệu, chỉ dùng tone vàng kim, đen, trắng và cảm giác cao cấp.\n\n"
         "Điều cần tránh:\n"
         "- Tránh chữ méo, chữ sai chính tả, chữ tiếng Anh không cần thiết.\n"
         "- Tránh gương mặt giả quá rõ, tay lỗi, đồng phục méo, logo bịa, khung cảnh nước ngoài.\n"
@@ -927,7 +1006,7 @@ def agent_manager_route(text):
     plain = strip_tone(text)
     if plain.startswith("confirm "):
         return "ads_operator"
-    if any(x in plain for x in ["doi cta", "cap nhat cta", "doi footer", "cap nhat footer", "doi style anh", "doi phong cach anh", "cap nhat style anh", "doi tone", "cap nhat tone", "campaign thang nay", "chien dich thang nay"]):
+    if any(x in plain for x in ["doi cta", "cap nhat cta", "doi footer", "cap nhat footer", "doi logo", "cap nhat logo", "logo thuong hieu", "doi style anh", "doi phong cach anh", "cap nhat style anh", "doi tone", "cap nhat tone", "campaign thang nay", "chien dich thang nay"]):
         return "settings_agent"
     if any(x in plain for x in ["nghien cuu viral", "tim bai viral", "facebook viral", "bai viet viral"]):
         return "viral_researcher"
@@ -978,6 +1057,7 @@ def settings_agent_handle(text):
             "- Đổi footer thành: ...\n"
             "- Đổi style ảnh thành: ảnh thật trong xưởng, ánh sáng tự nhiên\n"
             "- Đổi tone màu thương hiệu thành: vàng kim, đen, trắng\n"
+            "- Đổi logo thương hiệu thành: link Google Drive hoặc link ảnh PNG\n"
             "- Campaign tháng này là: tập trung đồng phục bảo hộ mùa mưa"
         )
 
@@ -987,6 +1067,9 @@ def settings_agent_handle(text):
     elif "footer" in plain:
         key = "default_footer"
         label = "footer"
+    elif "logo" in plain:
+        key = "brand_logo_url"
+        label = "logo thương hiệu"
     elif any(x in plain for x in ["style anh", "phong cach anh", "prompt anh", "anh minh hoa"]):
         key = "image_style"
         label = "style ảnh"
@@ -1478,6 +1561,25 @@ def debug_openai(secret):
     }
 
 
+@app.get("/debug/logo/<secret>")
+def debug_logo(secret):
+    if secret != env("WEBHOOK_SECRET"):
+        abort(404)
+    logo_url = workspace_config().get("brand_logo_url", "")
+    result = {
+        "has_brand_logo_url": bool(logo_url),
+        "download_url_detected": bool(google_drive_download_url(logo_url)) if logo_url else False,
+    }
+    if logo_url:
+        try:
+            logo_bytes = download_brand_logo()
+            logo = Image.open(io.BytesIO(logo_bytes))
+            result.update({"ok": True, "bytes": len(logo_bytes), "width": logo.width, "height": logo.height, "mode": logo.mode})
+        except Exception as exc:
+            result.update({"ok": False, "error": str(exc)[:500]})
+    return result, 200
+
+
 @app.get("/debug/gemini-image/<secret>")
 def debug_gemini_image(secret):
     if secret != env("WEBHOOK_SECRET"):
@@ -1514,6 +1616,7 @@ def debug_workspace(secret):
         "media_folder_id": config["media_folder_id"],
         "has_default_cta": bool(config["default_cta"]),
         "has_default_footer": bool(config["default_footer"]),
+        "has_brand_logo_url": bool(config["brand_logo_url"]),
         "image_style": config["image_style"][:300],
         "brand_tone": config["brand_tone"][:300],
         "campaign_context": config["campaign_context"][:300],
@@ -1539,6 +1642,7 @@ def debug_reload_config(secret):
         "campaign_context": config["campaign_context"][:500],
         "has_default_cta": bool(config["default_cta"]),
         "has_default_footer": bool(config["default_footer"]),
+        "has_brand_logo_url": bool(config["brand_logo_url"]),
     }, 200
 
 
