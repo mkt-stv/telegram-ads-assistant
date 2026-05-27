@@ -1,4 +1,7 @@
 import json
+import base64
+import hashlib
+import io
 import os
 import random
 import re
@@ -15,6 +18,17 @@ PENDING = {}
 LAST_DRAFT = {}
 
 
+AGENT_CATALOG = {
+    "manager": "Phân tích câu lệnh, giao việc cho agent phù hợp, giữ CONFIRM cho hành động thật.",
+    "ads_report": "Lấy báo cáo, phân tích ads, đề xuất tối ưu từ Meta Ads.",
+    "ads_operator": "Dừng, bật lại campaign/adset/ad sau khi người dùng CONFIRM.",
+    "content_writer": "Viết bài, caption, nội dung quảng cáo bằng Gemini.",
+    "image_creator": "Tạo ảnh minh họa bằng OpenAI Images API.",
+    "social_publisher": "Đăng bài/ảnh lên Facebook, LinkedIn qua Composio sau khi CONFIRM.",
+    "memory_scheduler": "Lưu draft, phong cách viết, lịch đăng. Hiện là bản nền, chưa có DB ngoài.",
+}
+
+
 def env(name, default=None):
     value = os.environ.get(name, default)
     if value is None or value == "":
@@ -24,6 +38,40 @@ def env(name, default=None):
 
 def gemini_model():
     return os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite")
+
+
+def openai_image_model():
+    return os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1.5")
+
+
+def state_file():
+    return os.environ.get("BOT_STATE_FILE", "/tmp/telegram_ads_assistant_state.json")
+
+
+def load_state():
+    global LAST_DRAFT
+    try:
+        with open(state_file(), "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        LAST_DRAFT = payload.get("last_draft", {})
+    except Exception:
+        LAST_DRAFT = {}
+
+
+def save_state():
+    try:
+        with open(state_file(), "w", encoding="utf-8") as f:
+            json.dump({"last_draft": LAST_DRAFT}, f, ensure_ascii=False)
+    except Exception:
+        app.logger.exception("Could not save bot state")
+
+
+def normalize_draft(draft):
+    if isinstance(draft, dict):
+        return draft
+    if isinstance(draft, str):
+        return {"text": draft}
+    return {}
 
 
 def strip_tone(text):
@@ -39,6 +87,46 @@ def send_telegram(text):
         data={"chat_id": chat_id, "text": text[:3900]},
         timeout=20,
     ).raise_for_status()
+
+
+def send_telegram_photo(image_bytes, caption=""):
+    token = env("TELEGRAM_BOT_TOKEN")
+    chat_id = env("TELEGRAM_CHAT_ID")
+    files = {"photo": ("image.png", io.BytesIO(image_bytes), "image/png")}
+    data = {"chat_id": chat_id}
+    if caption:
+        data["caption"] = caption[:1000]
+    requests.post(
+        f"https://api.telegram.org/bot{token}/sendPhoto",
+        data=data,
+        files=files,
+        timeout=45,
+    ).raise_for_status()
+
+
+def openai_generate_image(prompt):
+    api_key = env("OPENAI_API_KEY")
+    res = requests.post(
+        "https://api.openai.com/v1/images/generations",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={
+            "model": openai_image_model(),
+            "prompt": prompt,
+            "size": os.environ.get("OPENAI_IMAGE_SIZE", "1024x1024"),
+            "n": 1,
+        },
+        timeout=120,
+    )
+    if not res.ok:
+        raise RuntimeError(res.text[:1000])
+    data = res.json()["data"][0]
+    if data.get("b64_json"):
+        return base64.b64decode(data["b64_json"])
+    if data.get("url"):
+        img = requests.get(data["url"], timeout=60)
+        img.raise_for_status()
+        return img.content
+    raise RuntimeError("OpenAI image response did not include image data.")
 
 
 def composio_execute(tool_slug, input_payload):
@@ -59,16 +147,61 @@ def composio_execute(tool_slug, input_payload):
     return res.json()
 
 
-def post_to_social(platform, text):
+def composio_upload_file(file_bytes, filename, mimetype, toolkit_slug, tool_slug):
+    api_key = env("COMPOSIO_API_KEY")
+    file_md5 = hashlib.md5(file_bytes).hexdigest()
+    res = requests.post(
+        "https://backend.composio.dev/api/v3.1/files/upload/request",
+        headers={"x-api-key": api_key, "Content-Type": "application/json"},
+        json={
+            "toolkit_slug": toolkit_slug,
+            "tool_slug": tool_slug,
+            "filename": filename,
+            "mimetype": mimetype,
+            "md5": file_md5,
+        },
+        timeout=30,
+    )
+    if not res.ok:
+        raise RuntimeError(res.text)
+    payload = res.json()
+    upload_url = payload.get("url") or payload.get("upload_url") or payload.get("presigned_url")
+    s3key = payload.get("key") or payload.get("s3key") or payload.get("s3_key")
+    if upload_url and not payload.get("exists"):
+        put = requests.put(upload_url, data=file_bytes, headers={"Content-Type": mimetype}, timeout=90)
+        if not put.ok:
+            raise RuntimeError(put.text[:1000])
+    if not s3key:
+        raise RuntimeError(f"Composio upload response missing s3 key: {payload}")
+    return {"name": filename, "mimetype": mimetype, "s3key": s3key}
+
+
+def post_to_social(platform, text, image_b64=None):
     platform_key = strip_tone(platform).upper()
     if "FACEBOOK" in platform_key:
-        action_id = env("COMPOSIO_FACEBOOK_POST_ACTION_ID")
-        default_payload = {
-            "page_id": env("COMPOSIO_FACEBOOK_PAGE_ID"),
-            "message": text,
-            "published": True,
-        }
-        payload_json = os.environ.get("COMPOSIO_FACEBOOK_POST_INPUT_JSON")
+        if image_b64:
+            action_id = os.environ.get("COMPOSIO_FACEBOOK_PHOTO_ACTION_ID", "FACEBOOK_CREATE_PHOTO_POST")
+            image_bytes = base64.b64decode(image_b64)
+            photo = composio_upload_file(image_bytes, "telegram-post.png", "image/png", "facebook", action_id)
+            default_payload = {
+                "page_id": env("COMPOSIO_FACEBOOK_PAGE_ID"),
+                "message": text,
+                "photo": photo,
+                "published": True,
+            }
+            payload_json = os.environ.get("COMPOSIO_FACEBOOK_PHOTO_INPUT_JSON")
+        else:
+            action_id = env("COMPOSIO_FACEBOOK_POST_ACTION_ID")
+            default_payload = {
+                "page_id": env("COMPOSIO_FACEBOOK_PAGE_ID"),
+                "message": text,
+                "published": True,
+            }
+            payload_json = os.environ.get("COMPOSIO_FACEBOOK_POST_INPUT_JSON")
+    elif "LINKEDIN" in platform_key:
+        action_id = env("COMPOSIO_LINKEDIN_POST_ACTION_ID")
+        default_payload = {"text": text}
+        payload_json = os.environ.get("COMPOSIO_LINKEDIN_POST_INPUT_JSON")
     elif "INSTAGRAM" in platform_key:
         action_id = env("COMPOSIO_INSTAGRAM_POST_ACTION_ID")
         default_payload = {"caption": text}
@@ -334,18 +467,64 @@ Yêu cầu của người dùng:
         return f"Lỗi khi tạo nội dung: {exc}"
 
 
+def image_prompt_from_text(text, draft_text=""):
+    return (
+        "Tạo ảnh minh họa marketing cho ngành đồng phục, bảo hộ lao động, may mặc. "
+        "Phong cách ảnh thật, sạch, chuyên nghiệp, phù hợp đăng Facebook/LinkedIn. "
+        "Không chèn chữ lên ảnh trừ khi người dùng yêu cầu rõ. "
+        f"Yêu cầu: {text}\n\n"
+        f"Nội dung bài viết liên quan:\n{draft_text[:1200]}"
+    )
+
+
+def create_image_for_draft(user_text, draft_text=""):
+    image_bytes = openai_generate_image(image_prompt_from_text(user_text, draft_text))
+    send_telegram_photo(image_bytes, "Ảnh minh họa đã tạo. Nếu muốn đăng kèm bài gần nhất, nhắn: đăng bài này lên Facebook")
+    return base64.b64encode(image_bytes).decode("ascii")
+
+
+def agent_manager_route(text):
+    plain = strip_tone(text)
+    if plain.startswith("confirm "):
+        return "ads_operator"
+    if any(x in plain for x in ["tao anh", "anh minh hoa", "hinh minh hoa", "kem anh", "co anh"]):
+        return "image_creator"
+    if any(x in plain for x in ["dang bai", "post bai", "up bai", "dang len facebook", "dang len linkedin"]):
+        return "social_publisher"
+    if any(x in plain for x in ["tao cho toi", "viet cho toi", "viet bai", "tao bai", "caption", "content"]):
+        return "content_writer"
+    if any(x in plain for x in ["dung", "tat", "pause", "bat", "resume", "chay lai"]):
+        return "ads_operator"
+    if any(x in plain for x in ["bao cao", "ads hom nay", "ads hnay", "ads hom qua", "bai quang cao", "nen lam gi", "goi y", "de xuat", "campaign"]):
+        return "ads_report"
+    if any(x in plain for x in ["lich", "moi ngay", "10h", "luu cach viet", "nho cach viet"]):
+        return "memory_scheduler"
+    return "manager"
+
+
+def agents_text():
+    lines = ["Kiến trúc Agent hiện tại:"]
+    for name, desc in AGENT_CATALOG.items():
+        lines.append(f"- {name}: {desc}")
+    lines.append("")
+    lines.append("Luồng xử lý: Telegram -> Agent Manager -> Agent con -> API/Composio/Meta/Gemini/OpenAI -> Telegram.")
+    lines.append("Các hành động thật như đăng bài, dừng ads, bật ads vẫn cần CONFIRM.")
+    return "\n".join(lines)
+
+
 def add_pending(entity, entity_id, status):
     code = str(random.randint(1000, 9999))
     PENDING[code] = {"entity": entity, "id": entity_id, "status": status, "expires": time.time() + 900}
     return code
 
 
-def add_pending_social(platform, text):
+def add_pending_social(platform, text, image_b64=None):
     code = str(random.randint(1000, 9999))
     PENDING[code] = {
         "type": "social_post",
         "platform": platform,
         "text": text,
+        "image_b64": image_b64,
         "expires": time.time() + 900,
     }
     return code
@@ -356,7 +535,7 @@ def confirm(code):
     if not item or item["expires"] < time.time():
         return "Mã CONFIRM không đúng hoặc đã hết hạn."
     if item.get("type") == "social_post":
-        result = post_to_social(item["platform"], item["text"])
+        result = post_to_social(item["platform"], item["text"], item.get("image_b64"))
         del PENDING[code]
         return f"Đã gửi bài lên {item['platform']} qua Composio.\nKết quả: {json.dumps(result, ensure_ascii=False)[:1000]}"
     meta_post(item["id"], {"status": item["status"]})
@@ -367,6 +546,9 @@ def confirm(code):
 def handle_text(text):
     plain = strip_tone(text)
     chat_key = "default"
+    agent = agent_manager_route(text)
+    if plain in ["/agents", "agents", "agent", "kien truc agent", "kien truc bot"]:
+        return agents_text()
     if plain in ["/help", "help"]:
         return help_text()
     if plain.startswith("confirm "):
@@ -374,6 +556,20 @@ def handle_text(text):
     if plain in ["/cancel", "huy", "cancel"]:
         PENDING.clear()
         return "Đã hủy các lệnh đang chờ xác nhận."
+    if agent == "image_creator":
+        draft = normalize_draft(LAST_DRAFT.get(chat_key))
+        draft_text = draft.get("text", "")
+        if any(x in plain for x in ["tao bai", "viet bai", "tao noi dung", "viet noi dung", "caption", "content"]) and not draft_text:
+            draft_text = gemini_generate_text(text)
+        try:
+            image_b64 = create_image_for_draft(text, draft_text)
+        except Exception as exc:
+            return f"Chưa tạo được ảnh. Kiểm tra OPENAI_API_KEY hoặc quota OpenAI.\nLỗi: {exc}"
+        LAST_DRAFT[chat_key] = {"text": draft_text, "image_b64": image_b64}
+        save_state()
+        if draft_text:
+            return draft_text + "\n\nĐã tạo ảnh minh họa. Nếu muốn đăng cả bài và ảnh, nhắn: đăng bài này lên Facebook"
+        return "Đã tạo ảnh minh họa. Nếu muốn viết thêm nội dung cho ảnh này, nhắn: viết bài cho ảnh vừa tạo."
     if "bai quang cao" in plain and ("tot" in plain or "hieu qua" in plain):
         return best_ads_text(text)
     if any(x in plain for x in ["nen lam gi", "goi y", "de xuat", "toi uu", "can chu y", "dang te", "dot tien", "toi nen lam gi"]):
@@ -382,14 +578,19 @@ def handle_text(text):
         return report_text(text)
     if any(x in plain for x in ["tao cho toi", "viet cho toi", "viet bai", "tao bai", "tao noi dung", "viet noi dung", "caption", "content"]):
         draft = gemini_generate_text(text)
-        LAST_DRAFT[chat_key] = draft
-        return draft + "\n\nNếu muốn đăng bài này, nhắn: đăng bài này lên Facebook"
-    if any(x in plain for x in ["dang bai nay len facebook", "dang len facebook", "post bai nay len facebook", "up bai nay len facebook"]):
-        draft = LAST_DRAFT.get(chat_key)
+        LAST_DRAFT[chat_key] = {"text": draft}
+        save_state()
+        return draft + "\n\nNếu muốn tạo ảnh minh họa, nhắn: tạo ảnh minh họa cho bài này\nNếu muốn đăng bài này, nhắn: đăng bài này lên Facebook"
+    if any(x in plain for x in ["dang bai nay len facebook", "dang len facebook", "post bai nay len facebook", "up bai nay len facebook", "dang bai nay len linkedin", "dang len linkedin"]):
+        platform = "LinkedIn" if "linkedin" in plain else "Facebook"
+        draft = normalize_draft(LAST_DRAFT.get(chat_key))
         if not draft:
             return "Chưa có bản nháp nào để đăng. Hãy nhắn: tạo cho tôi một bài viết về ..."
-        code = add_pending_social("Facebook", draft)
-        return f"Mình sẽ đăng bản nháp gần nhất lên Facebook qua Composio.\nGửi: CONFIRM {code}\nMã hết hạn sau 15 phút."
+        draft_text = draft.get("text", "")
+        image_b64 = draft.get("image_b64")
+        code = add_pending_social(platform, draft_text, image_b64)
+        media_note = " kèm ảnh" if image_b64 else ""
+        return f"Mình sẽ đăng bản nháp gần nhất{media_note} lên {platform} qua Composio.\nGửi: CONFIRM {code}\nMã hết hạn sau 15 phút."
     if any(x in plain for x in ["campaign", "chien dich"]) and not any(x in plain for x in ["dung", "tat", "bat", "pause", "resume"]):
         return campaigns_text()
     match = re.search(r"(dung|tat|pause)\s+(campaign|chien dich|adset|nhom quang cao|ad|ads|quang cao)\s+(\d+)", plain)
@@ -427,8 +628,9 @@ def handle_text(text):
             return help_text()
         if intent.get("intent") == "content":
             draft = gemini_generate_text(text)
-            LAST_DRAFT[chat_key] = draft
-            return draft + "\n\nNếu muốn đăng bài này, nhắn: đăng bài này lên Facebook"
+            LAST_DRAFT[chat_key] = {"text": draft}
+            save_state()
+            return draft + "\n\nNếu muốn tạo ảnh minh họa, nhắn: tạo ảnh minh họa cho bài này\nNếu muốn đăng bài này, nhắn: đăng bài này lên Facebook"
         if intent.get("intent") == "cancel":
             PENDING.clear()
             return "Đã hủy các lệnh đang chờ xác nhận."
@@ -439,6 +641,9 @@ def handle_text(text):
                 "nên làm gì hôm nay, xem danh sách campaign, dừng campaign <id>."
             )
     return "Mình chưa hiểu rõ. Bạn có thể hỏi: báo cáo ads hôm nay, bài quảng cáo nào đang tốt, hoặc nên làm gì hôm nay."
+
+
+load_state()
 
 
 @app.get("/health")
@@ -488,6 +693,17 @@ def debug_composio(secret):
         "instagram_action_id": os.environ.get("COMPOSIO_INSTAGRAM_POST_ACTION_ID", ""),
     }
     return status
+
+
+@app.get("/debug/openai/<secret>")
+def debug_openai(secret):
+    if secret != env("WEBHOOK_SECRET"):
+        abort(404)
+    return {
+        "has_api_key": bool(os.environ.get("OPENAI_API_KEY")),
+        "image_model": openai_image_model(),
+        "image_size": os.environ.get("OPENAI_IMAGE_SIZE", "1024x1024"),
+    }
 
 
 @app.post("/telegram/<secret>")

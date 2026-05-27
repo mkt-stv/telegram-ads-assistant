@@ -21,5 +21,25 @@ services:
         sync: false
       - key: GEMINI_API_KEY
         sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_IMAGE_MODEL
+        value: gpt-image-1.5
+      - key: OPENAI_IMAGE_SIZE
+        value: 1024x1024
+      - key: COMPOSIO_API_KEY
+        sync: false
+      - key: COMPOSIO_CONNECTED_ACCOUNT_ID
+        sync: false
+      - key: COMPOSIO_USER_ID
+        value: user_rz7pm
+      - key: COMPOSIO_FACEBOOK_PAGE_ID
+        sync: false
+      - key: COMPOSIO_FACEBOOK_POST_ACTION_ID
+        value: FACEBOOK_CREATE_POST
+      - key: COMPOSIO_FACEBOOK_PHOTO_ACTION_ID
+        value: FACEBOOK_CREATE_PHOTO_POST
+      - key: COMPOSIO_LINKEDIN_POST_ACTION_ID
+        sync: false
       - key: WEBHOOK_SECRET
         generateValue: true
