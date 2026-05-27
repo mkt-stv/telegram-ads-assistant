@@ -70,6 +70,10 @@ def workspace_config():
             "DEFAULT_IMAGE_STYLE",
             "Ảnh thật, sạch, chuyên nghiệp, ánh sáng tự nhiên, phù hợp ngành đồng phục và bảo hộ lao động.",
         ),
+        "brand_colors": RUNTIME_CONFIG.get("brand_colors") or os.environ.get(
+            "DEFAULT_BRAND_COLORS",
+            "vàng kim, đen, trắng; dùng vàng kim làm điểm nhấn, đen tạo cảm giác cao cấp, trắng giữ bố cục sạch.",
+        ),
         "brand_tone": RUNTIME_CONFIG.get("brand_tone") or os.environ.get(
             "DEFAULT_BRAND_TONE",
             "Rõ ràng, đáng tin, thực tế, không phóng đại.",
@@ -212,6 +216,12 @@ def refresh_runtime_config_from_sheet(force=False):
             if setting_type and value:
                 config[setting_type] = value
 
+        if not config.get("brand_colors"):
+            config["brand_colors"] = os.environ.get(
+                "DEFAULT_BRAND_COLORS",
+                "vàng kim, đen, trắng; dùng vàng kim làm điểm nhấn, đen tạo cảm giác cao cấp, trắng giữ bố cục sạch.",
+            )
+
         apply_runtime_config(config)
         CONFIG_LOADED_AT = time.time()
         save_state()
@@ -228,6 +238,18 @@ def normalize_draft(draft):
     if isinstance(draft, str):
         return {"text": draft}
     return {}
+
+
+def compact_spaces(text):
+    return re.sub(r"\s+", " ", (text or "").strip())
+
+
+def image_hook_from_draft(draft_text, fallback="Đồng phục chuẩn, nâng tầm hình ảnh doanh nghiệp"):
+    for line in (draft_text or "").splitlines():
+        cleaned = compact_spaces(line).strip("-•# ")
+        if cleaned and len(cleaned) >= 8:
+            return cleaned[:90]
+    return fallback
 
 
 def strip_tone(text):
@@ -849,13 +871,32 @@ def viral_research_text(text):
 
 def image_prompt_from_text(text, draft_text=""):
     config = workspace_config()
+    hook = image_hook_from_draft(draft_text)
+    user_request = compact_spaces(text)
+    campaign_context = compact_spaces(config["campaign_context"]) or "Không có campaign riêng, dùng định vị thương hiệu Sư Tử Vàng."
     return (
-        "Tạo ảnh minh họa marketing cho ngành đồng phục, bảo hộ lao động, may mặc. "
-        f"Phong cách ảnh: {config['image_style']} "
-        f"Ngữ cảnh campaign hiện tại: {config['campaign_context']} "
-        "Không chèn chữ lên ảnh trừ khi người dùng yêu cầu rõ. "
-        f"Yêu cầu: {text}\n\n"
-        f"Nội dung bài viết liên quan:\n{draft_text[:1200]}"
+        "Tạo một ảnh minh họa marketing khung dọc 4:5 cho thương hiệu Đồng Phục Cao Cấp Sư Tử Vàng.\n"
+        "Toàn bộ chỉ dẫn dưới đây là tiếng Việt, giữ đúng tinh thần Việt Nam, không dùng bối cảnh nước ngoài.\n\n"
+        "Yêu cầu hình ảnh:\n"
+        "- Tỷ lệ ảnh: 4:5, phù hợp đăng Facebook và LinkedIn.\n"
+        "- Phong cách: cao cấp, sang trọng, chuyên nghiệp, sạch, ánh sáng đẹp, bố cục có chiều sâu.\n"
+        f"- Tone màu thương hiệu: {config['brand_colors']}\n"
+        "- Bối cảnh ở Việt Nam: xưởng may hiện đại, văn phòng doanh nghiệp Việt Nam, công trình hoặc nhà máy tại Việt Nam tùy nội dung.\n"
+        "- Chủ thể là người Việt Nam, tác phong chuyên nghiệp, trang phục đồng phục hoặc bảo hộ lao động chỉn chu.\n"
+        "- Hình ảnh cần có bối cảnh rõ, chủ thể rõ, sản phẩm đồng phục/bảo hộ rõ.\n"
+        "- Không nhồi nhiều chữ lên ảnh.\n"
+        "- Chỉ đặt một câu Tiêu đề/HOOK ngắn bằng tiếng Việt trên ảnh, dễ đọc, không quá 8 từ.\n"
+        f"- Câu Tiêu đề/HOOK trên ảnh: \"{hook}\"\n"
+        "- Không thêm CTA, số điện thoại, website, hashtag, đoạn văn dài hoặc chữ nhỏ trên ảnh.\n"
+        "- Không tự vẽ sai logo. Nếu cần gợi thương hiệu, chỉ dùng tone vàng kim, đen, trắng và cảm giác cao cấp.\n\n"
+        "Điều cần tránh:\n"
+        "- Tránh chữ méo, chữ sai chính tả, chữ tiếng Anh không cần thiết.\n"
+        "- Tránh gương mặt giả quá rõ, tay lỗi, đồng phục méo, logo bịa, khung cảnh nước ngoài.\n"
+        "- Tránh nền rối, màu quá sặc sỡ, phong cách hoạt hình nếu không được yêu cầu.\n\n"
+        f"Phong cách ảnh đang áp dụng: {config['image_style']}\n"
+        f"Ngữ cảnh campaign: {campaign_context}\n"
+        f"Yêu cầu cụ thể của người dùng: {user_request}\n\n"
+        f"Nội dung bài viết liên quan để hiểu ngữ cảnh, không đưa nguyên văn toàn bộ lên ảnh:\n{draft_text[:1200]}"
     )
 
 
@@ -919,6 +960,7 @@ def settings_agent_handle(text):
             "- Đổi CTA thành: ...\n"
             "- Đổi footer thành: ...\n"
             "- Đổi style ảnh thành: ảnh thật trong xưởng, ánh sáng tự nhiên\n"
+            "- Đổi tone màu thương hiệu thành: vàng kim, đen, trắng\n"
             "- Campaign tháng này là: tập trung đồng phục bảo hộ mùa mưa"
         )
 
@@ -931,6 +973,9 @@ def settings_agent_handle(text):
     elif any(x in plain for x in ["style anh", "phong cach anh", "prompt anh", "anh minh hoa"]):
         key = "image_style"
         label = "style ảnh"
+    elif any(x in plain for x in ["mau thuong hieu", "tone mau", "mau logo", "brand color", "brand colors"]):
+        key = "brand_colors"
+        label = "tone màu thương hiệu"
     elif any(x in plain for x in ["tone", "giong van", "van phong"]):
         key = "brand_tone"
         label = "tone thương hiệu"
@@ -1303,11 +1348,11 @@ def debug_setup_config_tabs(secret):
             "rows": [
                 [
                     "img_default",
-                    "Ảnh thật chuyên nghiệp",
-                    "Dùng cho post Facebook/LinkedIn ngành đồng phục, bảo hộ lao động.",
-                    "Ảnh thật, sạch, ánh sáng tự nhiên, bối cảnh xưởng/văn phòng/công trình, sản phẩm rõ, không chèn chữ lên ảnh nếu không yêu cầu.",
-                    "Tránh chữ méo, logo sai, mặt người giả quá rõ, nền rối, màu quá sặc sỡ.",
-                    "1:1",
+                    "Ảnh cao cấp 4:5 theo tone Sư Tử Vàng",
+                    "Dùng cho post Facebook/LinkedIn ngành đồng phục, bảo hộ lao động và đồng phục doanh nghiệp.",
+                    "Ảnh thật, khung dọc 4:5, cao cấp, sang trọng, bối cảnh Việt Nam, chủ thể người Việt Nam, sản phẩm rõ, tone vàng kim - đen - trắng, chỉ có một câu tiêu đề/hook ngắn trên ảnh.",
+                    "Tránh nhiều chữ, tránh CTA/footer/hashtag trên ảnh, tránh chữ méo, logo bịa, bối cảnh nước ngoài, mặt người giả quá rõ, nền rối, màu quá sặc sỡ.",
+                    "4:5",
                     "active",
                     now_text(),
                 ]
@@ -1352,6 +1397,42 @@ def debug_setup_config_tabs(secret):
             results[-1]["write_error"] = str(exc)[:300]
 
     return {"ok": True, "results": results}, 200
+
+
+@app.get("/debug/update-image-style-default/<secret>")
+def debug_update_image_style_default(secret):
+    if secret != env("WEBHOOK_SECRET"):
+        abort(404)
+    values = [
+        [
+            "img_default",
+            "Ảnh cao cấp 4:5 theo tone Sư Tử Vàng",
+            "Dùng cho post Facebook/LinkedIn ngành đồng phục, bảo hộ lao động và đồng phục doanh nghiệp.",
+            "Ảnh thật, khung dọc 4:5, cao cấp, sang trọng, bối cảnh Việt Nam, chủ thể người Việt Nam, sản phẩm rõ, tone vàng kim - đen - trắng, chỉ có một câu tiêu đề/hook ngắn trên ảnh.",
+            "Tránh nhiều chữ, tránh CTA/footer/hashtag trên ảnh, tránh chữ méo, logo bịa, bối cảnh nước ngoài, mặt người giả quá rõ, nền rối, màu quá sặc sỡ.",
+            "4:5",
+            "active",
+            now_text(),
+        ]
+    ]
+    try:
+        google_sheets_write("Image_Styles", values, "A2")
+        append_settings_change(
+            "brand_colors",
+            "vàng kim, đen, trắng; dùng vàng kim làm điểm nhấn, đen tạo cảm giác cao cấp, trắng giữ bố cục sạch.",
+            note="Updated brand image color palette",
+            source="system",
+        )
+        append_settings_change(
+            "image_style",
+            "Ảnh thật khung dọc 4:5, cao cấp, sang trọng, bối cảnh Việt Nam, chủ thể người Việt Nam, sản phẩm rõ, tone vàng kim - đen - trắng, chỉ có một câu tiêu đề/hook ngắn trên ảnh, không nhiều text.",
+            note="Updated default image style",
+            source="system",
+        )
+        refresh_runtime_config_from_sheet(force=True)
+        return {"ok": True}, 200
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}, 200
 
 
 @app.post("/debug/handle/<secret>")
