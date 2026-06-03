@@ -1071,8 +1071,10 @@ def image_prompt_from_text(text, draft_text=""):
     )
 
 
-def create_image_for_draft(user_text, draft_text=""):
+def create_image_for_draft(user_text, draft_text="", send_draft_first=False):
     image_bytes = generate_image(image_prompt_from_text(user_text, draft_text))
+    if send_draft_first and draft_text:
+        send_telegram(draft_text)
     send_telegram_photo(image_bytes, "Ảnh minh họa đã tạo. Nếu muốn đăng kèm bài gần nhất, nhắn: đăng bài này lên Facebook")
     return base64.b64encode(image_bytes).decode("ascii")
 
@@ -1245,7 +1247,7 @@ def handle_text(text):
                 draft_text = ""
         image_prompt = image_prompt_from_text(text, draft_text)
         try:
-            image_b64 = create_image_for_draft(text, draft_text)
+            image_b64 = create_image_for_draft(text, draft_text, send_draft_first=wants_new_draft)
         except Exception as exc:
             content_id, sheet_error = append_content_record(
                 topic=text,
@@ -1277,6 +1279,8 @@ def handle_text(text):
         )
         LAST_DRAFT[chat_key] = {"text": draft_text, "image_b64": image_b64, "image_prompt": image_prompt, "content_id": content_id}
         save_state()
+        if draft_text and wants_new_draft:
+            return "Đã gửi bài viết và ảnh minh họa. Nếu muốn đăng cả bài và ảnh, nhắn: đăng bài này lên Facebook" + sheet_note(sheet_error)
         if draft_text:
             return draft_text + "\n\nĐã tạo ảnh minh họa. Nếu muốn đăng cả bài và ảnh, nhắn: đăng bài này lên Facebook" + sheet_note(sheet_error)
         return "Đã tạo ảnh minh họa. Nếu muốn viết thêm nội dung cho ảnh này, nhắn: viết bài cho ảnh vừa tạo." + sheet_note(sheet_error)
