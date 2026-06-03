@@ -103,6 +103,7 @@ def workspace_config():
             "CONTENT_BRAND_VOICE",
             "Sư Tử Vàng nói chuyện rõ ràng, đáng tin, có kinh nghiệm thực tế trong đồng phục và bảo hộ lao động.",
         ),
+        "content_pillars_summary": RUNTIME_CONFIG.get("content_pillars_summary") or "",
     }
 
 
@@ -197,6 +198,8 @@ def refresh_runtime_config_from_sheet(force=False):
             [
                 "Settings!A1:B80",
                 "Settings_Changes!A1:G300",
+                "Content_Prompt!A1:E120",
+                "Content_Pillars!A1:H120",
                 "Image_Styles!A1:H80",
                 "Campaign_Context!A1:K80",
             ]
@@ -239,6 +242,32 @@ def refresh_runtime_config_from_sheet(force=False):
             value = row.get("value", "")
             if setting_type and value:
                 config[setting_type] = value
+
+        prompt_rows = active_rows(parse_table(values_by_sheet.get("Content_Prompt", [])))
+        for row in prompt_rows:
+            setting_type = str(row.get("setting_type", "")).strip()
+            value = row.get("value", "")
+            if setting_type and value:
+                config[setting_type] = value
+
+        pillars = active_rows(parse_table(values_by_sheet.get("Content_Pillars", [])))
+        if pillars:
+            lines = []
+            for row in pillars:
+                lines.append(
+                    " | ".join(
+                        x
+                        for x in [
+                            row.get("pillar_id", ""),
+                            row.get("pillar_name", ""),
+                            f"Core: {compact_spaces(row.get('core_message', ''))[:500]}",
+                            f"Pain: {compact_spaces(row.get('pain_points', ''))[:350]}",
+                            f"Angles: {compact_spaces(row.get('content_angles', ''))[:500]}",
+                        ]
+                        if x
+                    )
+                )
+            config["content_pillars_summary"] = "\n".join(lines)
 
         if not config.get("brand_colors"):
             config["brand_colors"] = os.environ.get(
@@ -1031,6 +1060,9 @@ Custom prompt style: {config["content_prompt_style"]}
 Cấu trúc nội dung cần theo: {config["content_structure"]}
 Giọng thương hiệu cần giữ: {config["content_brand_voice"]}
 Những điều không được dùng: {config["content_do_not_use"]}
+Content Pillars đang áp dụng:
+{config["content_pillars_summary"]}
+
 Mẫu bài tham khảo nếu có:
 {config["content_examples"]}
 
@@ -1780,6 +1812,63 @@ def debug_setup_content_prompt_defaults(secret):
     return {"ok": all(item["ok"] for item in results), "results": results}, 200
 
 
+@app.get("/debug/setup-content-prompt-tab/<secret>")
+def debug_setup_content_prompt_tab(secret):
+    if secret != env("WEBHOOK_SECRET"):
+        abort(404)
+    values = [
+        ["setting_type", "value", "note", "status", "updated_at"],
+        [
+            "content_prompt_style",
+            "Viết như một cố vấn thực tế, rõ ý, có chiều sâu. Không viết kiểu quảng cáo lố. Ưu tiên câu ngắn, dễ đọc, gần với chủ doanh nghiệp, HR, admin mua hàng.",
+            "Phong cách viết chung",
+            "active",
+            now_text(),
+        ],
+        [
+            "content_structure",
+            "Dòng đầu là hook viết hoa chữ cái đầu từng từ. Sau đó viết 2-3 đoạn ngắn. Nếu dùng bullet thì tối đa 3 bullet. Cuối bài luôn có CTA và footer. Không ghi nhãn HOOK, NỘI DUNG, CTA, FOOTER.",
+            "Cấu trúc bài viết",
+            "active",
+            now_text(),
+        ],
+        [
+            "content_do_not_use",
+            "Không dùng: không chỉ... mà còn, giải pháp tối ưu, nâng tầm quá nhiều, đột phá, toàn diện, chuyên nghiệp hóa nếu không cần. Không bịa số liệu, tiêu chuẩn, chứng nhận, dự án, khách hàng.",
+            "Cụm từ/cách viết cần tránh",
+            "active",
+            now_text(),
+        ],
+        [
+            "content_brand_voice",
+            "Sư Tử Vàng nói chuyện như một đơn vị may đồng phục có kinh nghiệm thực chiến: rõ ràng, đáng tin, tư vấn thật, không nói như agency quảng cáo.",
+            "Giọng thương hiệu",
+            "active",
+            now_text(),
+        ],
+        [
+            "content_examples",
+            "",
+            "Dán 3-5 bài mẫu vào đây nếu muốn bot học theo giọng viết",
+            "active",
+            now_text(),
+        ],
+    ]
+    result = []
+    try:
+        google_sheets_add_sheet("Content_Prompt", rows=120, columns=8)
+        result.append({"step": "create_sheet", "ok": True})
+    except Exception as exc:
+        result.append({"step": "create_sheet", "ok": False, "error": str(exc)[:250]})
+    try:
+        google_sheets_write("Content_Prompt", values, "A1")
+        refresh_runtime_config_from_sheet(force=True)
+        result.append({"step": "write_defaults", "ok": True})
+    except Exception as exc:
+        result.append({"step": "write_defaults", "ok": False, "error": str(exc)[:500]})
+    return {"ok": all(item["ok"] or item["step"] == "create_sheet" for item in result), "result": result}, 200
+
+
 @app.post("/debug/handle/<secret>")
 def debug_handle(secret):
     if secret != env("WEBHOOK_SECRET"):
@@ -1899,6 +1988,7 @@ def debug_workspace(secret):
         "content_do_not_use": config["content_do_not_use"][:300],
         "content_brand_voice": config["content_brand_voice"][:300],
         "has_content_examples": bool(config["content_examples"]),
+        "content_pillars_summary": config["content_pillars_summary"][:800],
         "runtime_config_keys": sorted(RUNTIME_CONFIG.keys()),
         "config_loaded_at": CONFIG_LOADED_AT,
         "state_file": state_file(),
@@ -1924,6 +2014,7 @@ def debug_reload_config(secret):
         "content_do_not_use": config["content_do_not_use"][:500],
         "content_brand_voice": config["content_brand_voice"][:500],
         "has_content_examples": bool(config["content_examples"]),
+        "content_pillars_summary": config["content_pillars_summary"][:1200],
         "has_default_cta": bool(config["default_cta"]),
         "has_default_footer": bool(config["default_footer"]),
         "has_brand_logo_url": bool(config["brand_logo_url"]),
