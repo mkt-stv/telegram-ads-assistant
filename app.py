@@ -82,6 +82,27 @@ def workspace_config():
         ),
         "brand_logo_url": RUNTIME_CONFIG.get("brand_logo_url") or os.environ.get("BRAND_LOGO_URL", ""),
         "campaign_context": RUNTIME_CONFIG.get("campaign_context", ""),
+        "content_prompt_style": RUNTIME_CONFIG.get("content_prompt_style")
+        or os.environ.get(
+            "CONTENT_PROMPT_STYLE",
+            "Viết như một cố vấn thực tế, rõ ý, có chiều sâu. Không viết kiểu quảng cáo lố.",
+        ),
+        "content_structure": RUNTIME_CONFIG.get("content_structure")
+        or os.environ.get(
+            "CONTENT_STRUCTURE",
+            "Dòng đầu là hook Title Case. Sau đó viết 2-3 đoạn ngắn. Có thể dùng tối đa 3 bullet nếu cần. Cuối bài có CTA và footer.",
+        ),
+        "content_do_not_use": RUNTIME_CONFIG.get("content_do_not_use")
+        or os.environ.get(
+            "CONTENT_DO_NOT_USE",
+            "Không dùng các cụm sáo rỗng, không bịa số liệu, không dùng nhãn HOOK/NỘI DUNG/CTA/FOOTER.",
+        ),
+        "content_examples": RUNTIME_CONFIG.get("content_examples") or os.environ.get("CONTENT_EXAMPLES", ""),
+        "content_brand_voice": RUNTIME_CONFIG.get("content_brand_voice")
+        or os.environ.get(
+            "CONTENT_BRAND_VOICE",
+            "Sư Tử Vàng nói chuyện rõ ràng, đáng tin, có kinh nghiệm thực tế trong đồng phục và bảo hộ lao động.",
+        ),
     }
 
 
@@ -1003,6 +1024,13 @@ def gemini_generate_text(user_text):
 Bạn là trợ lý marketing tiếng Việt cho ngành đồng phục, bảo hộ lao động, may mặc.
 Tone thương hiệu: {config["brand_tone"]}
 Ngữ cảnh campaign hiện tại: {config["campaign_context"]}
+Custom prompt style: {config["content_prompt_style"]}
+Cấu trúc nội dung cần theo: {config["content_structure"]}
+Giọng thương hiệu cần giữ: {config["content_brand_voice"]}
+Những điều không được dùng: {config["content_do_not_use"]}
+Mẫu bài tham khảo nếu có:
+{config["content_examples"]}
+
 Viết tự nhiên, rõ ràng, thực tế. Không dùng giọng quảng cáo quá đà. Không bịa số liệu, chứng nhận, khách hàng, dự án nếu người dùng không cung cấp.
 Nếu người dùng yêu cầu bài viết, hãy viết liền mạch như một bài đăng mạng xã hội hoàn chỉnh.
 Không ghi các nhãn như HOOK, NỘI DUNG, CTA, FOOTER.
@@ -1143,7 +1171,7 @@ def agent_manager_route(text):
     plain = strip_tone(text)
     if plain.startswith("confirm "):
         return "ads_operator"
-    if any(x in plain for x in ["doi cta", "cap nhat cta", "doi footer", "cap nhat footer", "doi logo", "cap nhat logo", "logo thuong hieu", "doi image provider", "doi provider anh", "provider anh", "doi nguon tao anh", "doi style anh", "doi phong cach anh", "cap nhat style anh", "doi tone", "cap nhat tone", "campaign thang nay", "chien dich thang nay"]):
+    if any(x in plain for x in ["doi cta", "cap nhat cta", "doi footer", "cap nhat footer", "doi logo", "cap nhat logo", "logo thuong hieu", "doi image provider", "doi provider anh", "provider anh", "doi nguon tao anh", "doi prompt viet bai", "custom prompt", "doi phong cach viet bai", "doi cau truc bai viet", "doi dieu cam khi viet", "doi bai mau", "doi giong thuong hieu", "doi style anh", "doi phong cach anh", "cap nhat style anh", "doi tone", "cap nhat tone", "campaign thang nay", "chien dich thang nay"]):
         return "settings_agent"
     if any(x in plain for x in ["nghien cuu viral", "tim bai viral", "facebook viral", "bai viet viral"]):
         return "viral_researcher"
@@ -1196,6 +1224,10 @@ def settings_agent_handle(text):
             "- Đổi tone màu thương hiệu thành: vàng kim, đen, trắng\n"
             "- Đổi logo thương hiệu thành: link Google Drive hoặc link ảnh PNG\n"
             "- Đổi provider ảnh thành: mock hoặc gemini hoặc openai\n"
+            "- Đổi phong cách viết bài thành: ...\n"
+            "- Đổi cấu trúc bài viết thành: ...\n"
+            "- Đổi điều cấm khi viết bài thành: ...\n"
+            "- Đổi bài mẫu thành: ...\n"
             "- Campaign tháng này là: tập trung đồng phục bảo hộ mùa mưa"
         )
 
@@ -1215,6 +1247,21 @@ def settings_agent_handle(text):
         key = "image_provider"
         label = "provider ảnh"
         value = value.lower()
+    elif any(x in plain for x in ["prompt viet bai", "custom prompt", "phong cach viet bai", "style viet bai"]):
+        key = "content_prompt_style"
+        label = "phong cách viết bài"
+    elif any(x in plain for x in ["cau truc bai viet", "format bai viet", "bo cuc bai viet"]):
+        key = "content_structure"
+        label = "cấu trúc bài viết"
+    elif any(x in plain for x in ["dieu cam khi viet", "khong duoc dung", "tu cam", "cum cam"]):
+        key = "content_do_not_use"
+        label = "điều cấm khi viết bài"
+    elif any(x in plain for x in ["bai mau", "mau bai", "example", "examples"]):
+        key = "content_examples"
+        label = "bài mẫu tham khảo"
+    elif any(x in plain for x in ["giong thuong hieu", "brand voice", "voice thuong hieu"]):
+        key = "content_brand_voice"
+        label = "giọng thương hiệu"
     elif any(x in plain for x in ["style anh", "phong cach anh", "prompt anh", "anh minh hoa"]):
         key = "image_style"
         label = "style ảnh"
@@ -1691,6 +1738,45 @@ def debug_update_image_style_default(secret):
         return {"ok": False, "error": str(exc)}, 200
 
 
+@app.get("/debug/setup-content-prompt-defaults/<secret>")
+def debug_setup_content_prompt_defaults(secret):
+    if secret != env("WEBHOOK_SECRET"):
+        abort(404)
+    defaults = [
+        (
+            "content_prompt_style",
+            "Viết như một cố vấn thực tế, rõ ý, có chiều sâu. Không viết kiểu quảng cáo lố. Ưu tiên câu ngắn, dễ đọc, gần với chủ doanh nghiệp, HR, admin mua hàng.",
+            "Default content writing style",
+        ),
+        (
+            "content_structure",
+            "Dòng đầu là hook viết hoa chữ cái đầu từng từ. Sau đó viết 2-3 đoạn ngắn. Nếu dùng bullet thì tối đa 3 bullet. Cuối bài luôn có CTA và footer. Không ghi nhãn HOOK, NỘI DUNG, CTA, FOOTER.",
+            "Default content structure",
+        ),
+        (
+            "content_do_not_use",
+            "Không dùng: không chỉ... mà còn, giải pháp tối ưu, nâng tầm quá nhiều, đột phá, toàn diện, chuyên nghiệp hóa nếu không cần. Không bịa số liệu, tiêu chuẩn, chứng nhận, dự án, khách hàng.",
+            "Default content banned phrases and rules",
+        ),
+        (
+            "content_brand_voice",
+            "Sư Tử Vàng nói chuyện như một đơn vị may đồng phục có kinh nghiệm thực chiến: rõ ràng, đáng tin, tư vấn thật, không nói như agency quảng cáo.",
+            "Default brand voice",
+        ),
+        (
+            "content_examples",
+            "",
+            "Paste sample posts here when available",
+        ),
+    ]
+    results = []
+    for key, value, note in defaults:
+        err = append_settings_change(key, value, note=note, source="system")
+        results.append({"key": key, "ok": err is None, "error": err})
+    refresh_runtime_config_from_sheet(force=True)
+    return {"ok": all(item["ok"] for item in results), "results": results}, 200
+
+
 @app.post("/debug/handle/<secret>")
 def debug_handle(secret):
     if secret != env("WEBHOOK_SECRET"):
@@ -1805,6 +1891,11 @@ def debug_workspace(secret):
         "image_style": config["image_style"][:300],
         "brand_tone": config["brand_tone"][:300],
         "campaign_context": config["campaign_context"][:300],
+        "content_prompt_style": config["content_prompt_style"][:300],
+        "content_structure": config["content_structure"][:300],
+        "content_do_not_use": config["content_do_not_use"][:300],
+        "content_brand_voice": config["content_brand_voice"][:300],
+        "has_content_examples": bool(config["content_examples"]),
         "runtime_config_keys": sorted(RUNTIME_CONFIG.keys()),
         "config_loaded_at": CONFIG_LOADED_AT,
         "state_file": state_file(),
@@ -1825,6 +1916,11 @@ def debug_reload_config(secret):
         "image_style": config["image_style"][:500],
         "brand_tone": config["brand_tone"][:500],
         "campaign_context": config["campaign_context"][:500],
+        "content_prompt_style": config["content_prompt_style"][:500],
+        "content_structure": config["content_structure"][:500],
+        "content_do_not_use": config["content_do_not_use"][:500],
+        "content_brand_voice": config["content_brand_voice"][:500],
+        "has_content_examples": bool(config["content_examples"]),
         "has_default_cta": bool(config["default_cta"]),
         "has_default_footer": bool(config["default_footer"]),
         "has_brand_logo_url": bool(config["brand_logo_url"]),
