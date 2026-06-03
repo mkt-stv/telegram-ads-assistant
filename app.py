@@ -22,6 +22,7 @@ RUNTIME_CONFIG = {}
 CONFIG_LOADED_AT = 0
 CONFIG_TTL_SECONDS = 300
 TELEGRAM_OUTBOX = []
+PROCESSED_UPDATES = set()
 LAST_CONFIG_SIGNATURE = ""
 CURRENT_CONFIG_SIGNATURE = ""
 CONFIG_WATCH_STARTED = False
@@ -591,6 +592,61 @@ def send_telegram(text):
         except Exception as exc:
             remember_telegram_send("message", False, None, chunk, str(exc))
             raise
+
+
+def send_telegram_buttons(text, buttons):
+    token = env("TELEGRAM_BOT_TOKEN")
+    chat_id = env("TELEGRAM_CHAT_ID")
+    chunks = telegram_chunks(text)
+    for idx, chunk in enumerate(chunks):
+        data = {"chat_id": chat_id, "text": chunk}
+        if idx == len(chunks) - 1 and buttons:
+            data["reply_markup"] = json.dumps({"inline_keyboard": buttons}, ensure_ascii=False)
+        try:
+            res = requests.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                data=data,
+                timeout=20,
+            )
+            remember_telegram_send("message_buttons", res.ok, res.status_code, chunk, "" if res.ok else res.text)
+            res.raise_for_status()
+        except Exception as exc:
+            remember_telegram_send("message_buttons", False, None, chunk, str(exc))
+            raise
+
+
+def answer_callback_query(callback_query_id, text=""):
+    if not callback_query_id:
+        return
+    token = env("TELEGRAM_BOT_TOKEN")
+    data = {"callback_query_id": callback_query_id}
+    if text:
+        data["text"] = text[:200]
+    try:
+        requests.post(f"https://api.telegram.org/bot{token}/answerCallbackQuery", data=data, timeout=10)
+    except Exception:
+        app.logger.exception("Could not answer callback query")
+
+
+def draft_action_buttons():
+    return [
+        [
+            {"text": "Tạo ảnh", "callback_data": "draft:create_image"},
+            {"text": "Đăng Facebook", "callback_data": "draft:post_facebook"},
+        ],
+        [
+            {"text": "Hủy", "callback_data": "draft:cancel"},
+        ],
+    ]
+
+
+def confirm_buttons(code):
+    return [
+        [
+            {"text": "Xác nhận", "callback_data": f"confirm:{code}"},
+            {"text": "Hủy", "callback_data": "draft:cancel"},
+        ]
+    ]
 
 
 def send_telegram_photo(image_bytes, caption=""):
@@ -1517,15 +1573,13 @@ def add_pending_social(platform, text, image_b64=None):
 
 
 def confirm(code):
-    item = PENDING.get(code)
+    item = PENDING.pop(code, None)
     if not item or item["expires"] < time.time():
         return "Mã CONFIRM không đúng hoặc đã hết hạn."
     if item.get("type") == "social_post":
         result = post_to_social(item["platform"], item["text"], item.get("image_b64"))
-        del PENDING[code]
         return f"Đã gửi bài lên {item['platform']} qua Composio.\nKết quả: {json.dumps(result, ensure_ascii=False)[:1000]}"
     meta_post(item["id"], {"status": item["status"]})
-    del PENDING[code]
     return f"Đã thực hiện: {item['entity']} {item['id']} -> {item['status']}"
 
 
@@ -1564,6 +1618,8 @@ def handle_text(text):
             draft_text = gemini_generate_text(text)
             if is_generation_error(draft_text):
                 draft_text = fallback_generate_text(text)
+        elif not draft_text:
+            return "Chưa có bài nháp nào để tạo ảnh. Hãy nhắn: Tạo 1 bài viết P1"
         image_prompt = image_prompt_from_text(text, draft_text)
         try:
             image_b64 = create_image_for_draft(text, draft_text, send_draft_first=wants_new_draft)
@@ -1617,7 +1673,7 @@ def handle_text(text):
         LAST_DRAFT[chat_key] = {"text": draft, "content_id": content_id}
         save_state()
         return draft + "\n\nNếu muốn tạo ảnh minh họa, nhắn: tạo ảnh minh họa cho bài này\nNếu muốn đăng bài này, nhắn: đăng bài này lên Facebook" + sheet_note(sheet_error)
-    if any(x in plain for x in ["dang bai nay len facebook", "dang len facebook", "post bai nay len facebook", "up bai nay len facebook", "dang bai nay len linkedin", "dang len linkedin"]):
+    if agent == "social_publisher" or any(x in plain for x in ["dang bai nay len facebook", "dang len facebook", "post bai nay len facebook", "up bai nay len facebook", "dang bai nay len linkedin", "dang len linkedin", "post bai", "up bai", "dang bai"]):
         platform = "LinkedIn" if "linkedin" in plain else "Facebook"
         draft = normalize_draft(LAST_DRAFT.get(chat_key))
         if not draft:
@@ -1683,6 +1739,39 @@ def handle_text(text):
                 "nên làm gì hôm nay, xem danh sách campaign, dừng campaign <id>."
             )
     return "Mình chưa hiểu rõ. Bạn có thể hỏi: báo cáo ads hôm nay, bài quảng cáo nào đang tốt, hoặc nên làm gì hôm nay."
+
+
+def handle_callback(data):
+    data = data or ""
+    chat_key = "default"
+    if data == "draft:cancel":
+        PENDING.clear()
+        return {"text": "Đã hủy thao tác đang chờ.", "buttons": None}
+
+    if data == "draft:create_image":
+        draft = normalize_draft(LAST_DRAFT.get(chat_key))
+        if not draft.get("text"):
+            return {"text": "Chưa có bài nháp nào để tạo ảnh. Hãy nhắn: Tạo 1 bài viết P1", "buttons": None}
+        return {"text": handle_text("tạo ảnh minh họa cho bài này"), "buttons": draft_action_buttons()}
+
+    if data == "draft:post_facebook":
+        draft = normalize_draft(LAST_DRAFT.get(chat_key))
+        draft_text = draft.get("text", "")
+        if not draft_text:
+            return {"text": "Chưa có bài nháp nào để đăng. Hãy nhắn: Tạo 1 bài viết P1", "buttons": None}
+        code = add_pending_social("Facebook", draft_text, draft.get("image_b64"))
+        media_note = " kèm ảnh" if draft.get("image_b64") else ""
+        pending_image_note = "\nẢnh đang chờ tạo thủ công nên lệnh này sẽ đăng text trước." if draft.get("image_status") == "pending_manual_image" and not draft.get("image_b64") else ""
+        return {
+            "text": f"Mình sẽ đăng bản nháp gần nhất{media_note} lên Facebook qua Composio.{pending_image_note}\nMã xác nhận: {code}\nMã hết hạn sau 15 phút.",
+            "buttons": confirm_buttons(code),
+        }
+
+    if data.startswith("confirm:"):
+        code = data.split(":", 1)[1].strip()
+        return {"text": confirm(code), "buttons": None}
+
+    return {"text": "Nút này chưa được hỗ trợ.", "buttons": None}
 
 
 load_state()
@@ -2225,6 +2314,35 @@ def telegram(secret):
     if secret != env("WEBHOOK_SECRET"):
         abort(404)
     update = request.get_json(force=True, silent=True) or {}
+    update_id = update.get("update_id")
+    if update_id is not None:
+        if update_id in PROCESSED_UPDATES:
+            return {"ok": True, "duplicate": True}
+        PROCESSED_UPDATES.add(update_id)
+        if len(PROCESSED_UPDATES) > 500:
+            PROCESSED_UPDATES.clear()
+
+    callback = update.get("callback_query") or {}
+    if callback:
+        callback_message = callback.get("message") or {}
+        callback_chat = callback_message.get("chat") or {}
+        if str(callback_chat.get("id")) != str(env("TELEGRAM_CHAT_ID")):
+            return {"ok": True}
+        answer_callback_query(callback.get("id"), "Đang xử lý")
+        try:
+            result = handle_callback(callback.get("data", ""))
+            if result.get("buttons"):
+                send_telegram_buttons(result.get("text", ""), result.get("buttons"))
+            else:
+                send_telegram(result.get("text", ""))
+        except Exception as exc:
+            app.logger.exception("Could not process Telegram callback")
+            try:
+                send_telegram(f"Lỗi khi xử lý nút: {exc}")
+            except Exception:
+                app.logger.exception("Could not send callback error to Telegram")
+        return {"ok": True}
+
     message = update.get("message") or {}
     chat = message.get("chat") or {}
     if str(chat.get("id")) != str(env("TELEGRAM_CHAT_ID")):
@@ -2233,9 +2351,17 @@ def telegram(secret):
     if not text:
         return {"ok": True}
     try:
-        send_telegram(handle_text(text))
+        reply = handle_text(text)
+        if is_content_request_plain(strip_tone(text)):
+            send_telegram_buttons(reply, draft_action_buttons())
+        else:
+            send_telegram(reply)
     except Exception as exc:
-        send_telegram(f"Lỗi khi xử lý lệnh: {exc}")
+        app.logger.exception("Could not process Telegram message")
+        try:
+            send_telegram(f"Lỗi khi xử lý lệnh: {exc}")
+        except Exception:
+            app.logger.exception("Could not send message error to Telegram")
     return {"ok": True}
 
 
