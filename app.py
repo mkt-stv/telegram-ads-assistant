@@ -528,7 +528,7 @@ def fallback_generate_text(user_text):
     body = [title_case_vietnamese(hook), ""]
     if core:
         body.extend([core, ""])
-    body.append("Khi chọn đồng phục, doanh nghiệp nên nhìn vào những điểm thực tế:")
+    body.append("Đây là những vấn đề doanh nghiệp thường gặp khi chọn đồng phục:")
     if pain_points:
         body.extend([f"- {item}" for item in pain_points])
     else:
