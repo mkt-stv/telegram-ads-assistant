@@ -20,6 +20,7 @@ LAST_DRAFT = {}
 RUNTIME_CONFIG = {}
 CONFIG_LOADED_AT = 0
 CONFIG_TTL_SECONDS = 300
+TELEGRAM_OUTBOX = []
 
 
 AGENT_CATALOG = {
@@ -296,14 +297,52 @@ def strip_tone(text):
     return "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn").lower()
 
 
+def remember_telegram_send(kind, ok, status_code=None, preview="", error=""):
+    TELEGRAM_OUTBOX.append(
+        {
+            "ts": now_text(),
+            "kind": kind,
+            "ok": ok,
+            "status_code": status_code,
+            "preview": preview[:500],
+            "error": error[:500],
+        }
+    )
+    del TELEGRAM_OUTBOX[:-30]
+
+
+def telegram_chunks(text, max_chars=3800):
+    text = text or ""
+    chunks = []
+    remaining = text
+    while len(remaining) > max_chars:
+        cut = remaining.rfind("\n\n", 0, max_chars)
+        if cut < 1200:
+            cut = remaining.rfind("\n", 0, max_chars)
+        if cut < 1200:
+            cut = max_chars
+        chunks.append(remaining[:cut].strip())
+        remaining = remaining[cut:].strip()
+    if remaining:
+        chunks.append(remaining)
+    return chunks or [""]
+
+
 def send_telegram(text):
     token = env("TELEGRAM_BOT_TOKEN")
     chat_id = env("TELEGRAM_CHAT_ID")
-    requests.post(
-        f"https://api.telegram.org/bot{token}/sendMessage",
-        data={"chat_id": chat_id, "text": text[:3900]},
-        timeout=20,
-    ).raise_for_status()
+    for chunk in telegram_chunks(text):
+        try:
+            res = requests.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                data={"chat_id": chat_id, "text": chunk},
+                timeout=20,
+            )
+            remember_telegram_send("message", res.ok, res.status_code, chunk, "" if res.ok else res.text)
+            res.raise_for_status()
+        except Exception as exc:
+            remember_telegram_send("message", False, None, chunk, str(exc))
+            raise
 
 
 def send_telegram_photo(image_bytes, caption=""):
@@ -313,12 +352,18 @@ def send_telegram_photo(image_bytes, caption=""):
     data = {"chat_id": chat_id}
     if caption:
         data["caption"] = caption[:1000]
-    requests.post(
-        f"https://api.telegram.org/bot{token}/sendPhoto",
-        data=data,
-        files=files,
-        timeout=45,
-    ).raise_for_status()
+    try:
+        res = requests.post(
+            f"https://api.telegram.org/bot{token}/sendPhoto",
+            data=data,
+            files=files,
+            timeout=45,
+        )
+        remember_telegram_send("photo", res.ok, res.status_code, caption, "" if res.ok else res.text)
+        res.raise_for_status()
+    except Exception as exc:
+        remember_telegram_send("photo", False, None, caption, str(exc))
+        raise
 
 
 def google_drive_download_url(url):
@@ -1643,6 +1688,13 @@ def debug_handle(secret):
         return {"ok": True, "reply": handle_text(text)}, 200
     except Exception as exc:
         return {"ok": False, "error": str(exc)}, 200
+
+
+@app.get("/debug/telegram-outbox/<secret>")
+def debug_telegram_outbox(secret):
+    if secret != env("WEBHOOK_SECRET"):
+        abort(404)
+    return {"ok": True, "outbox": TELEGRAM_OUTBOX[-15:]}, 200
 
 
 @app.get("/debug/openai/<secret>")
