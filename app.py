@@ -5,6 +5,7 @@ import io
 import os
 import random
 import re
+import threading
 import time
 import unicodedata
 from datetime import date, timedelta
@@ -21,6 +22,18 @@ RUNTIME_CONFIG = {}
 CONFIG_LOADED_AT = 0
 CONFIG_TTL_SECONDS = 300
 TELEGRAM_OUTBOX = []
+LAST_CONFIG_SIGNATURE = ""
+CURRENT_CONFIG_SIGNATURE = ""
+CONFIG_WATCH_STARTED = False
+CONFIG_WATCH_LOCK = threading.Lock()
+CONFIG_WATCH_SHEETS = [
+    "Settings!A1:B80",
+    "Settings_Changes!A1:G300",
+    "Content_Prompt!A1:E120",
+    "Content_Pillars!A1:H120",
+    "Image_Styles!A1:H80",
+    "Campaign_Context!A1:K80",
+]
 
 
 AGENT_CATALOG = {
@@ -112,21 +125,34 @@ def state_file():
 
 
 def load_state():
-    global LAST_DRAFT, RUNTIME_CONFIG
+    global LAST_DRAFT, RUNTIME_CONFIG, LAST_CONFIG_SIGNATURE, CURRENT_CONFIG_SIGNATURE
     try:
         with open(state_file(), "r", encoding="utf-8") as f:
             payload = json.load(f)
         LAST_DRAFT = payload.get("last_draft", {})
         RUNTIME_CONFIG = payload.get("runtime_config", {})
+        LAST_CONFIG_SIGNATURE = payload.get("last_config_signature", "")
+        CURRENT_CONFIG_SIGNATURE = payload.get("current_config_signature", "")
     except Exception:
         LAST_DRAFT = {}
         RUNTIME_CONFIG = {}
+        LAST_CONFIG_SIGNATURE = ""
+        CURRENT_CONFIG_SIGNATURE = ""
 
 
 def save_state():
     try:
         with open(state_file(), "w", encoding="utf-8") as f:
-            json.dump({"last_draft": LAST_DRAFT, "runtime_config": RUNTIME_CONFIG}, f, ensure_ascii=False)
+            json.dump(
+                {
+                    "last_draft": LAST_DRAFT,
+                    "runtime_config": RUNTIME_CONFIG,
+                    "last_config_signature": LAST_CONFIG_SIGNATURE,
+                    "current_config_signature": CURRENT_CONFIG_SIGNATURE,
+                },
+                f,
+                ensure_ascii=False,
+            )
     except Exception:
         app.logger.exception("Could not save bot state")
 
@@ -166,6 +192,12 @@ def google_sheets_batch_get(ranges):
     return composio_execute("GOOGLESHEETS_BATCH_GET", payload)
 
 
+def config_signature(values_by_sheet):
+    relevant = {sheet: values_by_sheet.get(sheet, []) for sheet in sorted(["Settings", "Settings_Changes", "Content_Prompt", "Content_Pillars", "Image_Styles", "Campaign_Context"])}
+    raw = json.dumps(relevant, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 def range_values_map(payload):
     mapped = {}
     for item in find_value_ranges(payload):
@@ -190,21 +222,13 @@ def apply_runtime_config(config):
 
 
 def refresh_runtime_config_from_sheet(force=False):
-    global CONFIG_LOADED_AT
+    global CONFIG_LOADED_AT, CURRENT_CONFIG_SIGNATURE
     if not force and time.time() - CONFIG_LOADED_AT < CONFIG_TTL_SECONDS:
         return False
     try:
-        payload = google_sheets_batch_get(
-            [
-                "Settings!A1:B80",
-                "Settings_Changes!A1:G300",
-                "Content_Prompt!A1:E120",
-                "Content_Pillars!A1:H120",
-                "Image_Styles!A1:H80",
-                "Campaign_Context!A1:K80",
-            ]
-        )
+        payload = google_sheets_batch_get(CONFIG_WATCH_SHEETS)
         values_by_sheet = range_values_map(payload)
+        CURRENT_CONFIG_SIGNATURE = config_signature(values_by_sheet)
         config = {}
 
         settings_rows = parse_table(values_by_sheet.get("Settings", []))
@@ -283,6 +307,64 @@ def refresh_runtime_config_from_sheet(force=False):
         app.logger.exception("Could not refresh runtime config from Sheet")
         CONFIG_LOADED_AT = time.time()
         return False
+
+
+def check_config_updates(notify=True, initialize=False):
+    global LAST_CONFIG_SIGNATURE
+    with CONFIG_WATCH_LOCK:
+        refreshed = refresh_runtime_config_from_sheet(force=True)
+        signature = CURRENT_CONFIG_SIGNATURE
+        if not signature:
+            return {"ok": False, "refreshed": refreshed, "changed": False, "error": "missing signature"}
+        if not LAST_CONFIG_SIGNATURE or initialize:
+            LAST_CONFIG_SIGNATURE = signature
+            save_state()
+            return {"ok": True, "refreshed": refreshed, "changed": False, "initialized": True}
+        if signature == LAST_CONFIG_SIGNATURE:
+            return {"ok": True, "refreshed": refreshed, "changed": False}
+
+        LAST_CONFIG_SIGNATURE = signature
+        save_state()
+        if notify:
+            send_telegram(
+                "Đã nhận cập nhật mới từ Sheet.\n"
+                "Bot đã reload Content_Prompt, Content_Pillars và các cấu hình liên quan.\n"
+                "Các bài viết/lệnh sau sẽ dùng bản mới."
+            )
+        return {"ok": True, "refreshed": refreshed, "changed": True, "notified": notify}
+
+
+def config_watch_interval_seconds():
+    raw = os.environ.get("CONFIG_WATCH_INTERVAL_SECONDS", "300")
+    try:
+        return max(60, int(raw))
+    except ValueError:
+        return 300
+
+
+def config_watcher_loop():
+    try:
+        check_config_updates(notify=False, initialize=True)
+    except Exception:
+        app.logger.exception("Could not initialize config watcher")
+    while True:
+        time.sleep(config_watch_interval_seconds())
+        try:
+            check_config_updates(notify=True)
+        except Exception:
+            app.logger.exception("Could not check config updates")
+
+
+def start_config_watcher():
+    global CONFIG_WATCH_STARTED
+    if CONFIG_WATCH_STARTED:
+        return False
+    if os.environ.get("CONFIG_WATCH_ENABLED", "true").lower() not in ["1", "true", "yes", "on"]:
+        return False
+    CONFIG_WATCH_STARTED = True
+    thread = threading.Thread(target=config_watcher_loop, name="config-watcher", daemon=True)
+    thread.start()
+    return True
 
 
 def normalize_draft(draft):
@@ -2021,6 +2103,22 @@ def debug_reload_config(secret):
     }, 200
 
 
+@app.get("/debug/check-config-updates/<secret>")
+def debug_check_config_updates(secret):
+    if secret != env("WEBHOOK_SECRET"):
+        abort(404)
+    notify = request.args.get("notify", "true").lower() not in ["0", "false", "no"]
+    initialize = request.args.get("initialize", "false").lower() in ["1", "true", "yes"]
+    result = check_config_updates(notify=notify, initialize=initialize)
+    return {
+        **result,
+        "watch_enabled": os.environ.get("CONFIG_WATCH_ENABLED", "true").lower() not in ["0", "false", "no", "off"],
+        "watch_interval_seconds": config_watch_interval_seconds(),
+        "has_signature": bool(CURRENT_CONFIG_SIGNATURE),
+        "has_last_signature": bool(LAST_CONFIG_SIGNATURE),
+    }, 200
+
+
 @app.post("/telegram/<secret>")
 def telegram(secret):
     if secret != env("WEBHOOK_SECRET"):
@@ -2038,6 +2136,9 @@ def telegram(secret):
     except Exception as exc:
         send_telegram(f"Lỗi khi xử lý lệnh: {exc}")
     return {"ok": True}
+
+
+start_config_watcher()
 
 
 if __name__ == "__main__":
