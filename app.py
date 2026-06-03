@@ -406,6 +406,16 @@ def preview_text(text, max_chars=3000):
     return preview.rstrip() + "\n..."
 
 
+def safe_json_value(value):
+    if isinstance(value, str):
+        return value.encode("utf-8", "replace").decode("utf-8")
+    if isinstance(value, dict):
+        return {safe_json_value(k): safe_json_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [safe_json_value(item) for item in value]
+    return value
+
+
 def clean_generated_post(text):
     text = (text or "").strip()
     text = text.removeprefix("```").removesuffix("```").strip()
@@ -1960,9 +1970,11 @@ def debug_handle(secret):
     if not text:
         return {"ok": False, "error": "missing text"}, 200
     try:
-        return {"ok": True, "reply": handle_text(text)}, 200
+        reply = handle_text(text)
+        return safe_json_value({"ok": True, "reply": reply}), 200
     except Exception as exc:
-        return {"ok": False, "error": str(exc)}, 200
+        app.logger.exception("Could not handle debug text")
+        return safe_json_value({"ok": False, "error": str(exc)}), 200
 
 
 @app.get("/debug/telegram-outbox/<secret>")
