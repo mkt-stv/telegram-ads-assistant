@@ -429,7 +429,8 @@ def clean_generated_post(text):
         text = text[: match.start(2)] + limit_words(hook, 16) + text[match.end(2) :]
     text = re.sub(r"(?im)^\s*(HOOK|NỘI DUNG|NOI DUNG|CTA|FOOTER)\s*:\s*", "", text)
     text = re.sub(r"(?i)không chỉ là", "không đơn thuần là", text)
-    text = re.sub(r"(?i)không chỉ", "không đơn thuần", text)
+    text = re.sub(r"(?i)không chỉ giúp", "giúp", text)
+    text = re.sub(r"(?i)không chỉ", "", text)
     text = re.sub(r"(?i)\bmà còn\b", "và", text)
     lines = text.splitlines()
     for idx, line in enumerate(lines):
