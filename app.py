@@ -432,6 +432,8 @@ def clean_generated_post(text):
     text = re.sub(r"(?i)không chỉ giúp", "giúp", text)
     text = re.sub(r"(?i)không chỉ", "", text)
     text = re.sub(r"(?i)\bmà còn\b", "và", text)
+    text = re.sub(r"(?i)không đơn thuần là [^.,\n]+,\s*và là", "là", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
     lines = text.splitlines()
     for idx, line in enumerate(lines):
         stripped = line.strip()
