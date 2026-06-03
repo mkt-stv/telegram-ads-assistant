@@ -10,7 +10,7 @@ import unicodedata
 from datetime import date, timedelta
 
 import requests
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 from flask import Flask, abort, request
 
 app = Flask(__name__)
@@ -56,7 +56,7 @@ def gemini_image_model():
 
 
 def image_provider():
-    return os.environ.get("IMAGE_PROVIDER", "openai").lower()
+    return (RUNTIME_CONFIG.get("image_provider") or os.environ.get("IMAGE_PROVIDER", "openai")).lower()
 
 
 def workspace_config():
@@ -431,8 +431,62 @@ def gemini_generate_image(prompt):
     raise RuntimeError("Gemini image response did not include image data.")
 
 
+def font_for_image(size):
+    candidates = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "C:/Windows/Fonts/arial.ttf",
+    ]
+    for path in candidates:
+        try:
+            return ImageFont.truetype(path, size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
+def mock_generate_image(prompt):
+    hook_match = re.search(r'Câu Tiêu đề/HOOK trên ảnh:\s*"([^"]+)"', prompt or "")
+    hook = hook_match.group(1) if hook_match else "Đồng phục chuẩn, doanh nghiệp chuyên nghiệp"
+    hook = limit_words(hook, 8)
+
+    width, height = 1080, 1350
+    img = Image.new("RGB", (width, height), (24, 24, 24))
+    draw = ImageDraw.Draw(img)
+
+    for y in range(height):
+        shade = int(24 + (y / height) * 28)
+        draw.line([(0, y), (width, y)], fill=(shade, shade, shade))
+
+    gold = (212, 168, 72)
+    white = (248, 248, 244)
+    soft = (235, 225, 205)
+    draw.rectangle([0, 0, width, 220], fill=white)
+    draw.rectangle([0, 220, width, 234], fill=gold)
+    draw.rounded_rectangle([70, 310, 1010, 1020], radius=28, fill=(38, 38, 38), outline=gold, width=5)
+    draw.rectangle([120, 760, 960, 940], outline=(86, 86, 86), width=3)
+    draw.ellipse([430, 420, 650, 640], fill=(70, 70, 70), outline=gold, width=4)
+    draw.rounded_rectangle([340, 630, 740, 920], radius=36, fill=(58, 58, 58), outline=soft, width=3)
+    draw.line([340, 700, 740, 700], fill=gold, width=6)
+    draw.line([430, 630, 430, 920], fill=(96, 96, 96), width=4)
+    draw.line([650, 630, 650, 920], fill=(96, 96, 96), width=4)
+
+    title_font = font_for_image(54)
+    note_font = font_for_image(28)
+    draw.text((80, 1085), hook, font=title_font, fill=white)
+    draw.text((80, 1165), "Ảnh test workflow - sẽ thay bằng ảnh AI thật khi có API ảnh.", font=note_font, fill=(200, 200, 200))
+    draw.text((80, 1210), "Tone: vàng kim, đen, trắng. Khung 4:5.", font=note_font, fill=(200, 200, 200))
+
+    out = io.BytesIO()
+    img.save(out, format="PNG", optimize=True)
+    return out.getvalue()
+
+
 def generate_image(prompt):
-    if image_provider() == "gemini":
+    provider = image_provider()
+    if provider == "mock":
+        image_bytes = mock_generate_image(prompt)
+    elif provider == "gemini":
         image_bytes = gemini_generate_image(prompt)
     else:
         image_bytes = openai_generate_image(prompt)
@@ -1027,7 +1081,7 @@ def agent_manager_route(text):
     plain = strip_tone(text)
     if plain.startswith("confirm "):
         return "ads_operator"
-    if any(x in plain for x in ["doi cta", "cap nhat cta", "doi footer", "cap nhat footer", "doi logo", "cap nhat logo", "logo thuong hieu", "doi style anh", "doi phong cach anh", "cap nhat style anh", "doi tone", "cap nhat tone", "campaign thang nay", "chien dich thang nay"]):
+    if any(x in plain for x in ["doi cta", "cap nhat cta", "doi footer", "cap nhat footer", "doi logo", "cap nhat logo", "logo thuong hieu", "doi image provider", "doi provider anh", "provider anh", "doi nguon tao anh", "doi style anh", "doi phong cach anh", "cap nhat style anh", "doi tone", "cap nhat tone", "campaign thang nay", "chien dich thang nay"]):
         return "settings_agent"
     if any(x in plain for x in ["nghien cuu viral", "tim bai viral", "facebook viral", "bai viet viral"]):
         return "viral_researcher"
@@ -1079,6 +1133,7 @@ def settings_agent_handle(text):
             "- Đổi style ảnh thành: ảnh thật trong xưởng, ánh sáng tự nhiên\n"
             "- Đổi tone màu thương hiệu thành: vàng kim, đen, trắng\n"
             "- Đổi logo thương hiệu thành: link Google Drive hoặc link ảnh PNG\n"
+            "- Đổi provider ảnh thành: mock hoặc gemini hoặc openai\n"
             "- Campaign tháng này là: tập trung đồng phục bảo hộ mùa mưa"
         )
 
@@ -1091,6 +1146,13 @@ def settings_agent_handle(text):
     elif "logo" in plain:
         key = "brand_logo_url"
         label = "logo thương hiệu"
+    elif any(x in plain for x in ["image provider", "provider anh", "nguon tao anh"]):
+        allowed = {"mock", "gemini", "openai"}
+        if value.lower() not in allowed:
+            return "Provider ảnh chỉ nhận một trong ba giá trị: mock, gemini, openai."
+        key = "image_provider"
+        label = "provider ảnh"
+        value = value.lower()
     elif any(x in plain for x in ["style anh", "phong cach anh", "prompt anh", "anh minh hoa"]):
         key = "image_style"
         label = "style ảnh"
