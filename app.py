@@ -117,6 +117,7 @@ def workspace_config():
             "Sư Tử Vàng nói chuyện rõ ràng, đáng tin, có kinh nghiệm thực tế trong đồng phục và bảo hộ lao động.",
         ),
         "content_pillars_summary": RUNTIME_CONFIG.get("content_pillars_summary") or "",
+        "content_pillars_data": RUNTIME_CONFIG.get("content_pillars_data") or [],
     }
 
 
@@ -277,6 +278,7 @@ def refresh_runtime_config_from_sheet(force=False):
         pillars = active_rows(parse_table(values_by_sheet.get("Content_Pillars", [])))
         if pillars:
             lines = []
+            config["content_pillars_data"] = pillars
             for row in pillars:
                 lines.append(
                     " | ".join(
@@ -467,6 +469,80 @@ def is_content_request_plain(plain):
     if any(x in plain for x in ["tao cho toi", "viet cho toi", "viet bai", "tao bai", "tao noi dung", "viet noi dung", "caption", "content"]):
         return True
     return bool(re.search(r"\b(tao|viet)\s+(\d+|mot|moi|cac)?\s*(bai|bai viet|noi dung|caption)\b", plain))
+
+
+def requested_pillar_id(text):
+    match = re.search(r"\bp\s*([1-9])\b", strip_tone(text))
+    if not match:
+        return ""
+    return f"P{match.group(1)}"
+
+
+def clean_pillar_core(core):
+    core = compact_spaces(core)
+    quoted = re.findall(r'"([^"]+)"', core)
+    if quoted:
+        return quoted[-1]
+    core = re.sub(r"(?i).*core message:\s*", "", core).strip()
+    return core
+
+
+def split_pillar_lines(value, limit=3):
+    lines = []
+    for raw in re.split(r"\n|•|\d+\.", value or ""):
+        item = compact_spaces(raw).strip("- ")
+        if item:
+            lines.append(item)
+        if len(lines) >= limit:
+            break
+    return lines
+
+
+def fallback_generate_text(user_text):
+    config = workspace_config()
+    pillars = config.get("content_pillars_data") or []
+    pillar_id = requested_pillar_id(user_text)
+    pillar = None
+    if pillar_id:
+        pillar = next((row for row in pillars if str(row.get("pillar_id", "")).upper() == pillar_id), None)
+    if not pillar and pillars:
+        pillar = pillars[0]
+    if not pillar:
+        return "Chưa có dữ liệu Content_Pillars để viết bài fallback. Hãy kiểm tra lại Sheet."
+
+    name = compact_spaces(pillar.get("pillar_name", "Đồng phục doanh nghiệp"))
+    core = clean_pillar_core(pillar.get("core_message", ""))
+    pain_points = split_pillar_lines(pillar.get("pain_points", ""), 3)
+    angles = split_pillar_lines(pillar.get("content_angles", ""), 2)
+
+    hook_by_pillar = {
+        "P1": "Đồng Phục Thiết Kế Riêng Giúp Doanh Nghiệp Chỉn Chu Hơn",
+        "P2": "Chọn Đúng Chất Liệu Giúp Đồng Phục Dễ Mặc Hơn",
+        "P3": "Một Bộ Đồng Phục Tốt Cần Được Kiểm Chứng Từ Thực Tế",
+        "P4": "Quy Trình Rõ Ràng Giúp Doanh Nghiệp Yên Tâm Hơn",
+        "P5": "May Mẫu Miễn Phí Giúp Doanh Nghiệp Giảm Rủi Ro",
+        "P6": "Cập Nhật Xu Hướng Giúp Kế Hoạch Đồng Phục Chủ Động Hơn",
+    }
+    hook = hook_by_pillar.get(str(pillar.get("pillar_id", "")).upper(), f"{name} Cho Doanh Nghiệp")
+
+    body = [title_case_vietnamese(hook), ""]
+    if core:
+        body.extend([core, ""])
+    body.append("Khi chọn đồng phục, doanh nghiệp nên nhìn vào những điểm thực tế:")
+    if pain_points:
+        body.extend([f"- {item}" for item in pain_points])
+    else:
+        body.extend(
+            [
+                "- Chất liệu có phù hợp môi trường làm việc không.",
+                "- Phom dáng có giúp người mặc thoải mái không.",
+                "- Mẫu thiết kế có giữ được hình ảnh thương hiệu không.",
+            ]
+        )
+    if angles:
+        body.extend(["", "Có thể bắt đầu bằng cách rà soát lại:", *[f"- {item}" for item in angles]])
+    body.extend(["", config["default_cta"], "", config["default_footer"]])
+    return clean_generated_post("\n".join(body))
 
 
 def remember_telegram_send(kind, ok, status_code=None, preview="", error=""):
@@ -1487,7 +1563,7 @@ def handle_text(text):
         if wants_new_draft:
             draft_text = gemini_generate_text(text)
             if is_generation_error(draft_text):
-                draft_text = ""
+                draft_text = fallback_generate_text(text)
         image_prompt = image_prompt_from_text(text, draft_text)
         try:
             image_b64 = create_image_for_draft(text, draft_text, send_draft_first=wants_new_draft)
@@ -1536,7 +1612,7 @@ def handle_text(text):
     if is_content_request_plain(plain):
         draft = gemini_generate_text(text)
         if is_generation_error(draft):
-            return draft
+            draft = fallback_generate_text(text)
         content_id, sheet_error = append_content_record(topic=text, draft_text=draft)
         LAST_DRAFT[chat_key] = {"text": draft, "content_id": content_id}
         save_state()
@@ -1592,7 +1668,7 @@ def handle_text(text):
         if intent.get("intent") == "content":
             draft = gemini_generate_text(text)
             if is_generation_error(draft):
-                return draft
+                draft = fallback_generate_text(text)
             content_id, sheet_error = append_content_record(topic=text, draft_text=draft)
             LAST_DRAFT[chat_key] = {"text": draft, "content_id": content_id}
             save_state()
