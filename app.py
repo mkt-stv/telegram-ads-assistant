@@ -307,6 +307,9 @@ def clean_generated_post(text):
         hook = compact_spaces(match.group(2))
         text = text[: match.start(2)] + limit_words(hook, 16) + text[match.end(2) :]
     text = re.sub(r"(?im)^\s*(HOOK|NỘI DUNG|NOI DUNG|CTA|FOOTER)\s*:\s*", "", text)
+    text = re.sub(r"(?i)không chỉ là", "không đơn thuần là", text)
+    text = re.sub(r"(?i)không chỉ", "không đơn thuần", text)
+    text = re.sub(r"(?i)\bmà còn\b", "và", text)
     lines = text.splitlines()
     for idx, line in enumerate(lines):
         stripped = line.strip()
@@ -1044,7 +1047,7 @@ Không dùng markdown, không dùng dấu **, không in đậm, không gạch đ
 Dưới phần nội dung, thêm đúng CTA chuẩn.
 Cuối bài, thêm đúng footer chuẩn.
 
-Giữ độ dài vừa phải để gửi Telegram. Không thêm hashtag ngoài phần footer. Tránh cấu trúc "không chỉ... mà còn".
+Giữ độ dài vừa phải để gửi Telegram. Không thêm hashtag ngoài phần footer. Tuyệt đối không dùng cấu trúc "không chỉ... mà còn" hoặc các biến thể gần giống.
 
 CTA chuẩn:
 {config["default_cta"]}
