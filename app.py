@@ -2109,7 +2109,11 @@ def debug_check_config_updates(secret):
         abort(404)
     notify = request.args.get("notify", "true").lower() not in ["0", "false", "no"]
     initialize = request.args.get("initialize", "false").lower() in ["1", "true", "yes"]
-    result = check_config_updates(notify=notify, initialize=initialize)
+    try:
+        result = check_config_updates(notify=notify, initialize=initialize)
+    except Exception as exc:
+        app.logger.exception("Could not check config updates from debug endpoint")
+        result = {"ok": False, "changed": False, "error": str(exc)[:500]}
     return {
         **result,
         "watch_enabled": os.environ.get("CONFIG_WATCH_ENABLED", "true").lower() not in ["0", "false", "no", "off"],
