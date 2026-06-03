@@ -483,9 +483,9 @@ def clean_pillar_core(core):
     core = compact_spaces(core)
     quoted = re.findall(r'"([^"]+)"', core)
     if quoted:
-        return quoted[-1]
+        return quoted[-1].strip(' "\'')
     core = re.sub(r"(?i).*core message:\s*", "", core).strip()
-    return core
+    return core.strip(' "\'')
 
 
 def split_pillar_lines(value, limit=3):
@@ -514,7 +514,6 @@ def fallback_generate_text(user_text):
     name = compact_spaces(pillar.get("pillar_name", "Đồng phục doanh nghiệp"))
     core = clean_pillar_core(pillar.get("core_message", ""))
     pain_points = split_pillar_lines(pillar.get("pain_points", ""), 3)
-    angles = split_pillar_lines(pillar.get("content_angles", ""), 2)
 
     hook_by_pillar = {
         "P1": "Đồng Phục Thiết Kế Riêng Giúp Doanh Nghiệp Chỉn Chu Hơn",
@@ -540,8 +539,7 @@ def fallback_generate_text(user_text):
                 "- Mẫu thiết kế có giữ được hình ảnh thương hiệu không.",
             ]
         )
-    if angles:
-        body.extend(["", "Có thể bắt đầu bằng cách rà soát lại:", *[f"- {item}" for item in angles]])
+    body.extend(["", "Từ đó, doanh nghiệp có thể chọn mẫu phù hợp hơn trước khi đặt số lượng lớn. Cách làm này giúp giảm sai sót, tiết kiệm thời gian và giữ hình ảnh đội ngũ chỉn chu hơn."])
     body.extend(["", config["default_cta"], "", config["default_footer"]])
     return clean_generated_post("\n".join(body))
 
