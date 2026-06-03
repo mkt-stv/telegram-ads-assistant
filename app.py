@@ -276,6 +276,7 @@ def preview_text(text, max_chars=3000):
 
 def clean_generated_post(text):
     text = (text or "").strip()
+    text = text.removeprefix("```").removesuffix("```").strip()
     text = text.replace("**", "")
     text = re.sub(r"(?m)^\s*[*•]\s*", "- ", text)
     text = re.sub(r"(?m)^-\s{2,}", "- ", text)
@@ -284,6 +285,16 @@ def clean_generated_post(text):
     if match:
         hook = compact_spaces(match.group(2))
         text = text[: match.start(2)] + limit_words(hook, 16) + text[match.end(2) :]
+    text = re.sub(r"(?im)^\s*(HOOK|NỘI DUNG|NOI DUNG|CTA|FOOTER)\s*:\s*", "", text)
+    lines = text.splitlines()
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped:
+            first = stripped[0].upper() + stripped[1:]
+            lines[idx] = line[: len(line) - len(line.lstrip())] + first
+            break
+    text = "\n".join(lines)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
     return text
 
 
@@ -986,20 +997,17 @@ Bạn là trợ lý marketing tiếng Việt cho ngành đồng phục, bảo h�
 Tone thương hiệu: {config["brand_tone"]}
 Ngữ cảnh campaign hiện tại: {config["campaign_context"]}
 Viết tự nhiên, rõ ràng, thực tế. Không dùng giọng quảng cáo quá đà. Không bịa số liệu, chứng nhận, khách hàng, dự án nếu người dùng không cung cấp.
-Nếu người dùng yêu cầu bài viết, trả lời đúng cấu trúc này:
+Nếu người dùng yêu cầu bài viết, hãy viết liền mạch như một bài đăng mạng xã hội hoàn chỉnh.
+Không ghi các nhãn như HOOK, NỘI DUNG, CTA, FOOTER.
+Không dùng dấu hai chấm để đặt tên từng phần.
 
-HOOK:
-Một câu mở đầu mạnh, tối đa 16 từ, có dấu tiếng Việt đầy đủ.
+Dòng đầu tiên là hook, tối đa 16 từ. Viết hoa chữ cái đầu tiên của hook.
 
-NỘI DUNG:
-Viết phần nội dung chính, ngắn gọn, có chiều sâu thực tế. Có thể dùng bullet ngắn nếu phù hợp.
+Sau hook là phần nội dung chính, ngắn gọn, có chiều sâu thực tế. Có thể dùng bullet ngắn nếu phù hợp.
 Không dùng markdown, không dùng dấu **, không in đậm, không gạch đầu dòng quá dài.
 
-CTA:
-Dùng đúng CTA chuẩn bên dưới, không tự đổi ý.
-
-FOOTER:
-Dùng đúng footer chuẩn bên dưới, không tự đổi ý.
+Dưới phần nội dung, thêm đúng CTA chuẩn.
+Cuối bài, thêm đúng footer chuẩn.
 
 Giữ độ dài vừa phải để gửi Telegram. Không thêm hashtag ngoài phần footer. Tránh cấu trúc "không chỉ... mà còn".
 
