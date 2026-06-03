@@ -302,7 +302,7 @@ def title_case_vietnamese(text):
         word = match.group(0)
         return word[0].upper() + word[1:]
 
-    return re.sub(r"\b[^\W\d_][^\s,.;:!?()\"“”'’/-]*", convert, text, flags=re.UNICODE)
+    return re.sub(r"[^\W\d_]+", convert, text, flags=re.UNICODE)
 
 
 def is_generation_error(text):
