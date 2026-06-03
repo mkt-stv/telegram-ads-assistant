@@ -1238,7 +1238,7 @@ def handle_text(text):
         draft_text = draft.get("text", "")
         if is_generation_error(draft_text):
             draft_text = ""
-        if any(x in plain for x in ["tao bai", "viet bai", "tao noi dung", "viet noi dung", "caption", "content"]) and not draft_text:
+        if any(x in plain for x in ["tao cho toi", "viet cho toi", "tao bai", "viet bai", "tao noi dung", "viet noi dung", "caption", "content"]) and not draft_text:
             draft_text = gemini_generate_text(text)
             if is_generation_error(draft_text):
                 draft_text = ""
