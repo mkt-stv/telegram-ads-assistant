@@ -1750,7 +1750,10 @@ def handle_callback(data):
         draft = normalize_draft(LAST_DRAFT.get(chat_key))
         if not draft.get("text"):
             return {"text": "Chưa có bài nháp nào để tạo ảnh. Hãy nhắn: Tạo 1 bài viết P1", "buttons": None}
-        return {"text": handle_text("tạo ảnh minh họa cho bài này"), "buttons": draft_action_buttons()}
+        result_text = handle_text("tạo ảnh minh họa cho bài này")
+        if "Image prompt:" not in result_text and not result_text.startswith("Chưa"):
+            result_text = "Đã tạo ảnh minh họa cho bài gần nhất. Nếu muốn đăng kèm bài và ảnh, bấm Đăng Facebook."
+        return {"text": result_text, "buttons": draft_action_buttons()}
 
     if data == "draft:post_facebook":
         draft = normalize_draft(LAST_DRAFT.get(chat_key))
