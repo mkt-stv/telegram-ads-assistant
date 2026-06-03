@@ -461,6 +461,12 @@ def strip_tone(text):
     return "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn").lower()
 
 
+def is_content_request_plain(plain):
+    if any(x in plain for x in ["tao cho toi", "viet cho toi", "viet bai", "tao bai", "tao noi dung", "viet noi dung", "caption", "content"]):
+        return True
+    return bool(re.search(r"\b(tao|viet)\s+(\d+|mot|moi|cac)?\s*(bai|bai viet|noi dung|caption)\b", plain))
+
+
 def remember_telegram_send(kind, ok, status_code=None, preview="", error=""):
     TELEGRAM_OUTBOX.append(
         {
@@ -1309,7 +1315,7 @@ def agent_manager_route(text):
         return "image_creator"
     if any(x in plain for x in ["dang bai", "post bai", "up bai", "dang len facebook", "dang len linkedin"]):
         return "social_publisher"
-    if any(x in plain for x in ["tao cho toi", "viet cho toi", "viet bai", "tao bai", "caption", "content"]):
+    if is_content_request_plain(plain):
         return "content_writer"
     if any(x in plain for x in ["dung", "tat", "pause", "bat", "resume", "chay lai"]):
         return "ads_operator"
@@ -1475,7 +1481,7 @@ def handle_text(text):
         draft_text = draft.get("text", "")
         if is_generation_error(draft_text):
             draft_text = ""
-        wants_new_draft = any(x in plain for x in ["tao cho toi", "viet cho toi", "tao bai", "viet bai", "tao noi dung", "viet noi dung", "caption", "content"])
+        wants_new_draft = is_content_request_plain(plain)
         if wants_new_draft:
             draft_text = gemini_generate_text(text)
             if is_generation_error(draft_text):
@@ -1525,7 +1531,7 @@ def handle_text(text):
         return recommendations_text(text)
     if any(x in plain for x in ["bao cao", "report", "ads hom nay", "ads hnay", "ads hom qua", "tinh hinh ads", "ads the nao"]):
         return report_text(text)
-    if any(x in plain for x in ["tao cho toi", "viet cho toi", "viet bai", "tao bai", "tao noi dung", "viet noi dung", "caption", "content"]):
+    if is_content_request_plain(plain):
         draft = gemini_generate_text(text)
         if is_generation_error(draft):
             return draft
