@@ -290,12 +290,19 @@ def clean_generated_post(text):
     for idx, line in enumerate(lines):
         stripped = line.strip()
         if stripped:
-            first = stripped[0].upper() + stripped[1:]
-            lines[idx] = line[: len(line) - len(line.lstrip())] + first
+            lines[idx] = line[: len(line) - len(line.lstrip())] + title_case_vietnamese(stripped)
             break
     text = "\n".join(lines)
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
     return text
+
+
+def title_case_vietnamese(text):
+    def convert(match):
+        word = match.group(0)
+        return word[0].upper() + word[1:]
+
+    return re.sub(r"\b[^\W\d_][^\s,.;:!?()\"“”'’/-]*", convert, text, flags=re.UNICODE)
 
 
 def is_generation_error(text):
