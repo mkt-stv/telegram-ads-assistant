@@ -128,7 +128,7 @@ def state_file():
 
 
 def load_state():
-    global PENDING, LAST_DRAFT, RUNTIME_CONFIG, LAST_CONFIG_SIGNATURE, CURRENT_CONFIG_SIGNATURE, PROCESSED_UPDATES
+    global PENDING, LAST_DRAFT, RUNTIME_CONFIG, LAST_CONFIG_SIGNATURE, CURRENT_CONFIG_SIGNATURE, PROCESSED_UPDATES, TELEGRAM_OUTBOX
     try:
         with open(state_file(), "r", encoding="utf-8") as f:
             payload = json.load(f)
@@ -138,6 +138,7 @@ def load_state():
         LAST_CONFIG_SIGNATURE = payload.get("last_config_signature", "")
         CURRENT_CONFIG_SIGNATURE = payload.get("current_config_signature", "")
         PROCESSED_UPDATES = set(payload.get("processed_updates", []))
+        TELEGRAM_OUTBOX = payload.get("telegram_outbox", [])[-30:]
     except Exception:
         PENDING = {}
         LAST_DRAFT = {}
@@ -145,6 +146,7 @@ def load_state():
         LAST_CONFIG_SIGNATURE = ""
         CURRENT_CONFIG_SIGNATURE = ""
         PROCESSED_UPDATES = set()
+        TELEGRAM_OUTBOX = []
 
 
 def save_state():
@@ -158,6 +160,7 @@ def save_state():
                     "last_config_signature": LAST_CONFIG_SIGNATURE,
                     "current_config_signature": CURRENT_CONFIG_SIGNATURE,
                     "processed_updates": list(PROCESSED_UPDATES)[-500:],
+                    "telegram_outbox": TELEGRAM_OUTBOX[-30:],
                 },
                 f,
                 ensure_ascii=False,
@@ -572,6 +575,7 @@ def remember_telegram_send(kind, ok, status_code=None, preview="", error=""):
         }
     )
     del TELEGRAM_OUTBOX[:-30]
+    save_state()
 
 
 def telegram_chunks(text, max_chars=3800):
@@ -2196,6 +2200,7 @@ def debug_handle(secret):
 def debug_telegram_outbox(secret):
     if secret != env("WEBHOOK_SECRET"):
         abort(404)
+    load_state()
     return {"ok": True, "outbox": TELEGRAM_OUTBOX[-15:]}, 200
 
 
