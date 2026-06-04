@@ -707,11 +707,15 @@ def answer_callback_query_async(callback_query_id, text=""):
 
 
 def process_callback_and_send(data):
-    result = handle_callback(data)
-    if result.get("buttons"):
-        send_telegram_buttons(result.get("text", ""), result.get("buttons"))
-    else:
-        send_telegram(result.get("text", ""))
+    try:
+        result = handle_callback(data)
+        if result.get("buttons"):
+            send_telegram_buttons(result.get("text", ""), result.get("buttons"))
+        else:
+            send_telegram(result.get("text", ""))
+    except Exception as exc:
+        app.logger.exception("Could not process callback in background")
+        send_telegram(f"Lỗi khi xử lý nút: {exc}")
 
 
 def process_callback_async(data):
@@ -734,10 +738,10 @@ def google_drive_download_url(url):
 
 
 def download_brand_logo():
-    logo_url = workspace_config().get("brand_logo_url", "").strip()
+    logo_url = workspace_config(refresh=False).get("brand_logo_url", "").strip()
     if not logo_url:
         return None
-    res = requests.get(google_drive_download_url(logo_url), timeout=45)
+    res = requests.get(google_drive_download_url(logo_url), timeout=8)
     res.raise_for_status()
     return res.content
 
