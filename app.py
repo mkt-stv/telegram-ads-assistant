@@ -127,19 +127,23 @@ def state_file():
 
 
 def load_state():
-    global LAST_DRAFT, RUNTIME_CONFIG, LAST_CONFIG_SIGNATURE, CURRENT_CONFIG_SIGNATURE
+    global PENDING, LAST_DRAFT, RUNTIME_CONFIG, LAST_CONFIG_SIGNATURE, CURRENT_CONFIG_SIGNATURE, PROCESSED_UPDATES
     try:
         with open(state_file(), "r", encoding="utf-8") as f:
             payload = json.load(f)
+        PENDING = payload.get("pending", {})
         LAST_DRAFT = payload.get("last_draft", {})
         RUNTIME_CONFIG = payload.get("runtime_config", {})
         LAST_CONFIG_SIGNATURE = payload.get("last_config_signature", "")
         CURRENT_CONFIG_SIGNATURE = payload.get("current_config_signature", "")
+        PROCESSED_UPDATES = set(payload.get("processed_updates", []))
     except Exception:
+        PENDING = {}
         LAST_DRAFT = {}
         RUNTIME_CONFIG = {}
         LAST_CONFIG_SIGNATURE = ""
         CURRENT_CONFIG_SIGNATURE = ""
+        PROCESSED_UPDATES = set()
 
 
 def save_state():
@@ -148,9 +152,11 @@ def save_state():
             json.dump(
                 {
                     "last_draft": LAST_DRAFT,
+                    "pending": PENDING,
                     "runtime_config": RUNTIME_CONFIG,
                     "last_config_signature": LAST_CONFIG_SIGNATURE,
                     "current_config_signature": CURRENT_CONFIG_SIGNATURE,
+                    "processed_updates": list(PROCESSED_UPDATES)[-500:],
                 },
                 f,
                 ensure_ascii=False,
@@ -1573,6 +1579,7 @@ def settings_agent_handle(text):
 def add_pending(entity, entity_id, status):
     code = str(random.randint(1000, 9999))
     PENDING[code] = {"entity": entity, "id": entity_id, "status": status, "expires": time.time() + 900}
+    save_state()
     return code
 
 
@@ -1585,11 +1592,13 @@ def add_pending_social(platform, text, image_b64=None):
         "image_b64": image_b64,
         "expires": time.time() + 900,
     }
+    save_state()
     return code
 
 
 def confirm(code):
     item = PENDING.pop(code, None)
+    save_state()
     if not item or item["expires"] < time.time():
         return "Mã CONFIRM không đúng hoặc đã hết hạn."
     if item.get("type") == "social_post":
@@ -1611,6 +1620,7 @@ def handle_text(text, async_sheet=False):
         return confirm(plain.split()[-1])
     if plain in ["/cancel", "huy", "cancel"]:
         PENDING.clear()
+        save_state()
         return "Đã hủy các lệnh đang chờ xác nhận."
     if plain in ["image prompt", "prompt anh", "lay prompt anh", "xem prompt anh"]:
         draft = normalize_draft(LAST_DRAFT.get(chat_key))
@@ -1758,6 +1768,7 @@ def handle_callback(data):
     chat_key = "default"
     if data == "draft:cancel":
         PENDING.clear()
+        save_state()
         return {"text": "Đã hủy thao tác đang chờ.", "buttons": None}
 
     if data == "draft:create_image":
@@ -2328,6 +2339,7 @@ def debug_check_config_updates(secret):
 def telegram(secret):
     if secret != env("WEBHOOK_SECRET"):
         abort(404)
+    load_state()
     update = request.get_json(force=True, silent=True) or {}
     update_id = update.get("update_id")
     if update_id is not None:
@@ -2336,6 +2348,7 @@ def telegram(secret):
         PROCESSED_UPDATES.add(update_id)
         if len(PROCESSED_UPDATES) > 500:
             PROCESSED_UPDATES.clear()
+        save_state()
 
     callback = update.get("callback_query") or {}
     if callback:
