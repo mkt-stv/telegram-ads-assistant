@@ -74,8 +74,9 @@ def image_provider():
     return (RUNTIME_CONFIG.get("image_provider") or os.environ.get("IMAGE_PROVIDER", "openai")).lower()
 
 
-def workspace_config():
-    refresh_runtime_config_from_sheet()
+def workspace_config(refresh=True):
+    if refresh:
+        refresh_runtime_config_from_sheet()
     return {
         "drive_folder_id": os.environ.get("GOOGLE_DRIVE_FOLDER_ID", ""),
         "sheet_id": os.environ.get("GOOGLE_SHEET_ID", ""),
@@ -505,8 +506,8 @@ def split_pillar_lines(value, limit=3):
     return lines
 
 
-def fallback_generate_text(user_text):
-    config = workspace_config()
+def fallback_generate_text(user_text, refresh_config=True):
+    config = workspace_config(refresh=refresh_config)
     pillars = config.get("content_pillars_data") or []
     pillar_id = requested_pillar_id(user_text)
     pillar = None
@@ -552,10 +553,10 @@ def fallback_generate_text(user_text):
 
 def generate_content_text(user_text):
     if requested_pillar_id(user_text):
-        return fallback_generate_text(user_text)
+        return fallback_generate_text(user_text, refresh_config=False)
     draft = gemini_generate_text(user_text)
     if is_generation_error(draft):
-        return fallback_generate_text(user_text)
+        return fallback_generate_text(user_text, refresh_config=False)
     return draft
 
 
