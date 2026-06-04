@@ -702,6 +702,10 @@ def send_telegram_buttons_async(text, buttons):
     return run_background("telegram-send-buttons", send_telegram_buttons, text, buttons)
 
 
+def answer_callback_query_async(callback_query_id, text=""):
+    return run_background("telegram-answer-callback", answer_callback_query, callback_query_id, text)
+
+
 def process_callback_and_send(data):
     result = handle_callback(data)
     if result.get("buttons"):
@@ -2388,6 +2392,16 @@ def telegram(secret):
         callback_chat = callback_message.get("chat") or {}
         if str(callback_chat.get("id")) != str(env("TELEGRAM_CHAT_ID")):
             return {"ok": True}
+        answer_callback_query_async(callback.get("id"), "Dang xu ly")
+        try:
+            process_callback_async(callback.get("data", ""))
+        except Exception as exc:
+            app.logger.exception("Could not enqueue Telegram callback")
+            try:
+                send_telegram_async(f"Loi khi xu ly nut: {exc}")
+            except Exception:
+                app.logger.exception("Could not enqueue callback error to Telegram")
+        return {"ok": True}
         answer_callback_query(callback.get("id"), "Đang xử lý")
         try:
             process_callback_async(callback.get("data", ""))
