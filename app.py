@@ -765,6 +765,53 @@ def looks_like_image_url(url):
     )
 
 
+def looks_like_video_url(url):
+    lowered = (url or "").lower()
+    return (
+        "drive.google.com" in lowered
+        or "docs.google.com" in lowered
+        or lowered.endswith((".mp4", ".mov", ".m4v", ".webm"))
+    )
+
+
+def explicit_media_type(value):
+    plain = strip_tone(str(value or "")).strip().lower()
+    if plain in ["image", "anh", "hinh", "photo", "picture"]:
+        return "image"
+    if plain in ["video", "clip", "reel", "short"]:
+        return "video"
+    return ""
+
+
+def image_file_url(url):
+    return (url or "").lower().split("?", 1)[0].endswith((".png", ".jpg", ".jpeg", ".webp"))
+
+
+def video_file_url(url):
+    return (url or "").lower().split("?", 1)[0].endswith((".mp4", ".mov", ".m4v", ".webm"))
+
+
+def video_mimetype_from_url(url, content_type=""):
+    content_type = (content_type or "").split(";", 1)[0].strip().lower()
+    if content_type.startswith("video/"):
+        return content_type
+    lowered = (url or "").lower()
+    if lowered.endswith(".mov"):
+        return "video/quicktime"
+    if lowered.endswith(".webm"):
+        return "video/webm"
+    return "video/mp4"
+
+
+def max_video_bytes():
+    raw = os.environ.get("MAX_SOCIAL_VIDEO_MB", "50")
+    try:
+        mb = max(1, int(raw))
+    except Exception:
+        mb = 50
+    return mb * 1024 * 1024
+
+
 def normalize_image_bytes(image_bytes, max_width=1600, max_height=2000):
     image = Image.open(io.BytesIO(image_bytes))
     image.thumbnail((max_width, max_height), Image.LANCZOS)
@@ -791,15 +838,45 @@ def download_image_from_url(url):
     return apply_brand_logo_overlay(normalize_image_bytes(res.content))
 
 
+def download_video_from_url(url):
+    if not looks_like_video_url(url):
+        raise RuntimeError("Link không giống link video hoặc link Google Drive.")
+    download_url = google_drive_download_url(url)
+    limit = max_video_bytes()
+    res = requests.get(download_url, stream=True, timeout=120)
+    res.raise_for_status()
+    content_type = (res.headers.get("Content-Type") or "").lower()
+    if "text/html" in content_type and "drive.google.com" in download_url:
+        raise RuntimeError("Google Drive chưa cho tải video trực tiếp. Hãy bật quyền Anyone with the link can view.")
+    content_length = res.headers.get("Content-Length")
+    if content_length and int(content_length) > limit:
+        raise RuntimeError(f"Video lớn hơn giới hạn {limit // 1024 // 1024}MB.")
+    chunks = []
+    total = 0
+    for chunk in res.iter_content(chunk_size=1024 * 1024):
+        if not chunk:
+            continue
+        total += len(chunk)
+        if total > limit:
+            raise RuntimeError(f"Video lớn hơn giới hạn {limit // 1024 // 1024}MB.")
+        chunks.append(chunk)
+    return b"".join(chunks), video_mimetype_from_url(url, content_type)
+
+
 def attach_image_to_draft(chat_key, image_url, source="manual_link", async_sheet=True):
     draft = restore_last_draft(chat_key)
     if not draft.get("text"):
         raise RuntimeError("Chưa có bài nháp nào để gắn ảnh. Hãy tạo bài trước.")
     image_bytes = download_image_from_url(image_url)
     draft.pop("image_b64", None)
+    draft.pop("video_url", None)
+    draft.pop("video_status", None)
     draft["image_url"] = image_url
+    draft["media_url"] = image_url
+    draft["media_type"] = "image"
     draft["image_status"] = "image_ready"
     draft["image_source"] = source
+    draft["media_source"] = source
     remember_last_draft(chat_key, draft, async_write=async_sheet)
     append_content_record(
         topic=f"{source}: {image_url}",
@@ -810,6 +887,30 @@ def attach_image_to_draft(chat_key, image_url, source="manual_link", async_sheet
         async_write=async_sheet,
     )
     return image_bytes, draft
+
+
+def attach_video_to_draft(chat_key, video_url, source="manual_link", async_sheet=True):
+    draft = restore_last_draft(chat_key)
+    if not draft.get("text"):
+        raise RuntimeError("Chưa có bài nháp nào để gắn video. Hãy tạo bài trước.")
+    draft.pop("image_b64", None)
+    draft.pop("image_url", None)
+    draft.pop("image_status", None)
+    draft["video_url"] = video_url
+    draft["media_url"] = video_url
+    draft["media_type"] = "video"
+    draft["video_status"] = "video_ready"
+    draft["media_source"] = source
+    remember_last_draft(chat_key, draft, async_write=async_sheet)
+    append_content_record(
+        topic=f"{source}: {video_url}",
+        draft_text=draft.get("text", ""),
+        image_prompt=draft.get("image_prompt", ""),
+        stage="video_ready",
+        status="needs_review",
+        async_write=async_sheet,
+    )
+    return draft
 
 
 def find_image_url_in_content_sheet(draft):
@@ -884,12 +985,229 @@ def find_image_url_in_content_sheet(draft):
     return ""
 
 
+def find_image_url_in_content_sheet(draft):
+    try:
+        payload = google_sheets_batch_get(["Content!A1:Z500"])
+        values = range_values_map(payload).get("Content", [])
+        rows = parse_table(values)
+    except Exception:
+        app.logger.exception("Could not read Content sheet for image URL")
+        return ""
+    if not rows:
+        return ""
+
+    content_id = str((draft or {}).get("content_id", "")).strip()
+    target = None
+    if content_id:
+        for row in rows:
+            row_ids = [
+                str(row.get(key, "")).strip()
+                for key in ["content_id", "record_id", "id", "Content ID", "Content_ID"]
+            ]
+            if content_id in row_ids:
+                target = row
+                break
+    if not target:
+        target = rows[-1]
+
+    preferred = ["image_url", "image_link", "media_url", "media_link", "drive_link", "manual_image_url", "Anh", "Link anh", "Ảnh", "Link ảnh"]
+
+    def find_in_row(row):
+        if not row:
+            return ""
+        media_type = explicit_media_type(row.get("media_type") or row.get("Media Type") or row.get("Loại media"))
+        stage_plain = strip_tone(str(row.get("stage") or row.get("Stage") or row.get("Trạng thái") or "")).lower()
+        if not media_type and ("image" in stage_plain or "anh" in stage_plain):
+            media_type = "image"
+        if not media_type and "video" in stage_plain:
+            media_type = "video"
+        if media_type == "video":
+            return ""
+        for key in preferred:
+            key_plain = strip_tone(str(key))
+            if "video" in key_plain:
+                continue
+            value = str(row.get(key, "")).strip()
+            if not value:
+                continue
+            for url in extract_urls(value) or [value]:
+                if image_file_url(url) or media_type == "image" or "image" in key_plain or "anh" in key_plain or "hinh" in key_plain:
+                    return url
+        for key, value in row.items():
+            key_plain = strip_tone(str(key))
+            if "video" in key_plain:
+                continue
+            for url in extract_urls(str(value)):
+                if image_file_url(url) or (media_type == "image" and looks_like_image_url(url)):
+                    return url
+        return ""
+
+    found = find_in_row(target)
+    if found:
+        return found
+
+    for row in reversed(rows):
+        found = find_in_row(row)
+        if found:
+            return found
+
+    raw_rows = values[1:] if len(values) > 1 else values
+    for raw in reversed(raw_rows):
+        for value in raw:
+            for url in extract_urls(str(value)):
+                if image_file_url(url):
+                    return url
+    return ""
+
+
 def attach_image_from_content_sheet(chat_key, async_sheet=True):
     draft = restore_last_draft(chat_key)
     image_url = find_image_url_in_content_sheet(draft)
     if not image_url:
         raise RuntimeError("Chưa thấy link ảnh Drive trong dòng Content trên Sheet.")
     return attach_image_to_draft(chat_key, image_url, source="content_sheet", async_sheet=async_sheet)
+
+
+def find_video_url_in_content_sheet(draft):
+    try:
+        payload = google_sheets_batch_get(["Content!A1:Z500"])
+        values = range_values_map(payload).get("Content", [])
+        rows = parse_table(values)
+    except Exception:
+        app.logger.exception("Could not read Content sheet for video URL")
+        return ""
+    if not rows:
+        return ""
+
+    content_id = str((draft or {}).get("content_id", "")).strip()
+    target = None
+    if content_id:
+        for row in rows:
+            row_ids = [
+                str(row.get(key, "")).strip()
+                for key in ["content_id", "record_id", "id", "Content ID", "Content_ID"]
+            ]
+            if content_id in row_ids:
+                target = row
+                break
+    if not target:
+        target = rows[-1]
+
+    preferred = ["video_url", "video_link", "media_url", "media_link", "drive_link", "manual_video_url", "Video", "Link video"]
+
+    def find_in_row(row):
+        if not row:
+            return ""
+        for key in preferred:
+            value = str(row.get(key, "")).strip()
+            if value:
+                for url in extract_urls(value) or [value]:
+                    if looks_like_video_url(url):
+                        return url
+        for key, value in row.items():
+            if "video" not in strip_tone(str(key)):
+                continue
+            for url in extract_urls(str(value)):
+                if looks_like_video_url(url):
+                    return url
+        return ""
+
+    found = find_in_row(target)
+    if found:
+        return found
+
+    for row in reversed(rows):
+        found = find_in_row(row)
+        if found:
+            return found
+
+    raw_rows = values[1:] if len(values) > 1 else values
+    for raw in reversed(raw_rows):
+        for value in raw:
+            for url in extract_urls(str(value)):
+                if url.lower().endswith((".mp4", ".mov", ".m4v", ".webm")):
+                    return url
+    return ""
+
+
+def find_video_url_in_content_sheet(draft):
+    try:
+        payload = google_sheets_batch_get(["Content!A1:Z500"])
+        values = range_values_map(payload).get("Content", [])
+        rows = parse_table(values)
+    except Exception:
+        app.logger.exception("Could not read Content sheet for video URL")
+        return ""
+    if not rows:
+        return ""
+
+    content_id = str((draft or {}).get("content_id", "")).strip()
+    target = None
+    if content_id:
+        for row in rows:
+            row_ids = [
+                str(row.get(key, "")).strip()
+                for key in ["content_id", "record_id", "id", "Content ID", "Content_ID"]
+            ]
+            if content_id in row_ids:
+                target = row
+                break
+    if not target:
+        target = rows[-1]
+
+    preferred = ["video_url", "video_link", "media_url", "media_link", "drive_link", "manual_video_url", "Video", "Link video"]
+
+    def find_in_row(row):
+        if not row:
+            return ""
+        media_type = explicit_media_type(row.get("media_type") or row.get("Media Type") or row.get("Loại media"))
+        stage_plain = strip_tone(str(row.get("stage") or row.get("Stage") or row.get("Trạng thái") or "")).lower()
+        if not media_type and "video" in stage_plain:
+            media_type = "video"
+        if not media_type and ("image" in stage_plain or "anh" in stage_plain):
+            media_type = "image"
+        if media_type == "image":
+            return ""
+        for key in preferred:
+            key_plain = strip_tone(str(key))
+            value = str(row.get(key, "")).strip()
+            if not value:
+                continue
+            for url in extract_urls(value) or [value]:
+                if video_file_url(url) or media_type == "video" or "video" in key_plain:
+                    return url
+        for key, value in row.items():
+            if "video" not in strip_tone(str(key)):
+                continue
+            for url in extract_urls(str(value)):
+                if video_file_url(url) or ((media_type == "video" or "video" in strip_tone(str(key))) and looks_like_video_url(url)):
+                    return url
+        return ""
+
+    found = find_in_row(target)
+    if found:
+        return found
+
+    for row in reversed(rows):
+        found = find_in_row(row)
+        if found:
+            return found
+
+    raw_rows = values[1:] if len(values) > 1 else values
+    for raw in reversed(raw_rows):
+        for value in raw:
+            for url in extract_urls(str(value)):
+                if video_file_url(url):
+                    return url
+    return ""
+
+
+def attach_video_from_content_sheet(chat_key, async_sheet=True):
+    draft = restore_last_draft(chat_key)
+    video_url = find_video_url_in_content_sheet(draft)
+    if not video_url:
+        raise RuntimeError("Chưa thấy link video Drive trong dòng Content trên Sheet.")
+    return attach_video_to_draft(chat_key, video_url, source="content_sheet", async_sheet=async_sheet)
 
 
 def download_brand_logo():
@@ -1163,12 +1481,30 @@ def bot_state_key(name):
 def durable_state_value(value):
     if isinstance(value, dict):
         cleaned = {}
+        allowed = {
+            "text",
+            "content_id",
+            "image_url",
+            "video_url",
+            "media_url",
+            "media_type",
+            "image_status",
+            "video_status",
+            "image_source",
+            "media_source",
+            "image_prompt",
+            "platform",
+            "type",
+            "expires",
+            "running",
+            "last_error",
+            "status",
+            "entity",
+            "id",
+        }
         for key, item in value.items():
             if isinstance(item, dict):
-                item = dict(item)
-                if item.pop("image_b64", None):
-                    item["has_local_image_b64"] = True
-                cleaned[key] = item
+                cleaned[key] = {k: v for k, v in item.items() if k in allowed and isinstance(v, (str, int, float, bool))}
             else:
                 cleaned[key] = item
         return cleaned
@@ -1398,15 +1734,30 @@ def composio_upload_file(file_bytes, filename, mimetype, toolkit_slug, tool_slug
     return {"name": filename, "mimetype": mimetype, "s3key": s3key}
 
 
-def post_to_social(platform, text, image_b64=None, image_url=None):
+def post_to_social(platform, text, image_b64=None, image_url=None, video_url=None):
     platform_key = strip_tone(platform).upper()
     if "FACEBOOK" in platform_key:
         image_bytes = None
-        if image_b64:
+        video_bytes = None
+        video_mimetype = "video/mp4"
+        if video_url:
+            action_id = os.environ.get("COMPOSIO_FACEBOOK_VIDEO_ACTION_ID")
+            if not action_id:
+                raise RuntimeError("Thiếu COMPOSIO_FACEBOOK_VIDEO_ACTION_ID để đăng video Facebook qua Composio.")
+            video_bytes, video_mimetype = download_video_from_url(video_url)
+            video = composio_upload_file(video_bytes, "telegram-post-video.mp4", video_mimetype, "facebook", action_id)
+            default_payload = {
+                "page_id": env("COMPOSIO_FACEBOOK_PAGE_ID"),
+                "description": text,
+                "video": video,
+                "published": True,
+            }
+            payload_json = os.environ.get("COMPOSIO_FACEBOOK_VIDEO_INPUT_JSON")
+        elif image_b64:
             image_bytes = base64.b64decode(image_b64)
         elif image_url:
             image_bytes = download_image_from_url(image_url)
-        if image_bytes:
+        if not video_url and image_bytes:
             action_id = os.environ.get("COMPOSIO_FACEBOOK_PHOTO_ACTION_ID", "FACEBOOK_CREATE_PHOTO_POST")
             photo = composio_upload_file(image_bytes, "telegram-post.png", "image/png", "facebook", action_id)
             default_payload = {
@@ -1416,7 +1767,7 @@ def post_to_social(platform, text, image_b64=None, image_url=None):
                 "published": True,
             }
             payload_json = os.environ.get("COMPOSIO_FACEBOOK_PHOTO_INPUT_JSON")
-        else:
+        elif not video_url:
             action_id = env("COMPOSIO_FACEBOOK_POST_ACTION_ID")
             default_payload = {
                 "page_id": env("COMPOSIO_FACEBOOK_PAGE_ID"),
@@ -1437,6 +1788,11 @@ def post_to_social(platform, text, image_b64=None, image_url=None):
 
     if payload_json:
         payload = json.loads(payload_json.replace("{text}", text))
+        if "FACEBOOK" in platform_key and video_url:
+            payload.setdefault("video", video)
+            payload.setdefault("description", text)
+            if env("COMPOSIO_FACEBOOK_PAGE_ID"):
+                payload.setdefault("page_id", env("COMPOSIO_FACEBOOK_PAGE_ID"))
         if "FACEBOOK" in platform_key and image_bytes:
             payload.setdefault("photo", photo)
             payload.setdefault("message", text)
@@ -1950,7 +2306,7 @@ def add_pending(entity, entity_id, status):
     return code
 
 
-def add_pending_social(platform, text, image_b64=None, image_url=None, content_id=None):
+def add_pending_social(platform, text, image_b64=None, image_url=None, content_id=None, video_url=None, media_type=""):
     code = str(random.randint(1000, 9999))
     PENDING[code] = {
         "type": "social_post",
@@ -1958,6 +2314,9 @@ def add_pending_social(platform, text, image_b64=None, image_url=None, content_i
         "text": text,
         "image_b64": image_b64,
         "image_url": image_url,
+        "video_url": video_url,
+        "media_url": video_url or image_url or "",
+        "media_type": media_type or ("video" if video_url else "image" if image_b64 or image_url else "text"),
         "content_id": content_id,
         "expires": time.time() + 900,
     }
@@ -1971,7 +2330,7 @@ def confirm(code):
     if not item or item["expires"] < time.time():
         return "Mã CONFIRM không đúng hoặc đã hết hạn."
     if item.get("type") == "social_post":
-        result = post_to_social(item["platform"], item["text"], item.get("image_b64"), item.get("image_url"))
+        result = post_to_social(item["platform"], item["text"], item.get("image_b64"), item.get("image_url"), item.get("video_url"))
         return f"Đã gửi bài lên {item['platform']} qua Composio.\nKết quả: {json.dumps(result, ensure_ascii=False)[:1000]}"
     meta_post(item["id"], {"status": item["status"]})
     return f"Đã thực hiện: {item['entity']} {item['id']} -> {item['status']}"
@@ -1990,7 +2349,7 @@ def confirm(code):
     remember_pending_state()
     try:
         if item.get("type") == "social_post":
-            result = post_to_social(item["platform"], item["text"], item.get("image_b64"), item.get("image_url"))
+            result = post_to_social(item["platform"], item["text"], item.get("image_b64"), item.get("image_url"), item.get("video_url"))
             PENDING.pop(code, None)
             remember_pending_state()
             return f"Đã gửi bài lên {item['platform']} qua Composio.\nKết quả: {json.dumps(result, ensure_ascii=False)[:1000]}"
@@ -2020,6 +2379,20 @@ def handle_text(text, async_sheet=False):
         PENDING.clear()
         remember_pending_state()
         return "Đã hủy các lệnh đang chờ xác nhận."
+    if any(x in plain for x in ["gan video tu sheet", "lay video tu sheet", "cap nhat video tu sheet"]):
+        try:
+            attach_video_from_content_sheet(chat_key, async_sheet=async_sheet)
+            return "Đã gắn video từ Sheet vào bài nháp. Bây giờ có thể bấm Đăng Facebook để tạo mã duyệt."
+        except Exception as exc:
+            return f"Chưa gắn được video từ Sheet: {exc}"
+    if any(x in plain for x in ["gan video", "cap nhat video", "them video", "dung video nay"]):
+        urls = [url for url in extract_urls(text) if looks_like_video_url(url)]
+        if urls:
+            try:
+                attach_video_to_draft(chat_key, urls[0], source="telegram_link", async_sheet=async_sheet)
+                return "Đã gắn video vào bài nháp. Bây giờ có thể bấm Đăng Facebook để tạo mã duyệt."
+            except Exception as exc:
+                return f"Chưa gắn được video: {exc}"
     if plain in ["image prompt", "prompt anh", "lay prompt anh", "xem prompt anh"]:
         draft = restore_last_draft(chat_key)
         prompt = draft.get("image_prompt")
@@ -2124,7 +2497,14 @@ def handle_text(text, async_sheet=False):
         draft_text = draft.get("text", "")
         image_b64 = draft.get("image_b64")
         image_url = draft.get("image_url")
-        if not image_b64 and not image_url:
+        video_url = draft.get("video_url") or (draft.get("media_url") if draft.get("media_type") == "video" else "")
+        if not image_b64 and not image_url and not video_url:
+            try:
+                draft = attach_video_from_content_sheet(chat_key, async_sheet=async_sheet)
+                video_url = draft.get("video_url") or (draft.get("media_url") if draft.get("media_type") == "video" else "")
+            except Exception:
+                video_url = ""
+        if not image_b64 and not image_url and not video_url:
             try:
                 _, draft = attach_image_from_content_sheet(chat_key, async_sheet=async_sheet)
                 image_b64 = draft.get("image_b64")
@@ -2132,10 +2512,11 @@ def handle_text(text, async_sheet=False):
             except Exception:
                 image_b64 = ""
                 image_url = ""
-        code = add_pending_social(platform, draft_text, image_b64, image_url, draft.get("content_id"))
+        code = add_pending_social(platform, draft_text, image_b64, image_url, draft.get("content_id"), video_url, "video" if video_url else "")
         media_note = " kèm ảnh" if image_b64 or image_url else ""
+        media_note = " kèm video" if video_url else media_note
         pending_image_note = ""
-        if draft.get("image_status") == "pending_manual_image" and not image_b64 and not image_url:
+        if draft.get("image_status") == "pending_manual_image" and not image_b64 and not image_url and not video_url:
             pending_image_note = "\nẢnh đang chờ tạo thủ công nên lệnh này sẽ đăng text trước."
         return f"Mình sẽ đăng bản nháp gần nhất{media_note} lên {platform} qua Composio.{pending_image_note}\nGửi: CONFIRM {code}\nMã hết hạn sau 15 phút."
     if any(x in plain for x in ["campaign", "chien dich"]) and not any(x in plain for x in ["dung", "tat", "bat", "pause", "resume"]):
@@ -2215,7 +2596,14 @@ def handle_callback(data):
             return {"text": "Chưa có bài nháp nào để đăng. Hãy nhắn: Tạo 1 bài viết P1", "buttons": None}
         image_b64 = draft.get("image_b64")
         image_url = draft.get("image_url")
-        if not image_b64 and not image_url:
+        video_url = draft.get("video_url") or (draft.get("media_url") if draft.get("media_type") == "video" else "")
+        if not image_b64 and not image_url and not video_url:
+            try:
+                draft = attach_video_from_content_sheet(chat_key, async_sheet=True)
+                video_url = draft.get("video_url") or (draft.get("media_url") if draft.get("media_type") == "video" else "")
+            except Exception:
+                video_url = ""
+        if not image_b64 and not image_url and not video_url:
             try:
                 _, draft = attach_image_from_content_sheet(chat_key, async_sheet=True)
                 image_b64 = draft.get("image_b64")
@@ -2223,11 +2611,12 @@ def handle_callback(data):
             except Exception:
                 image_b64 = ""
                 image_url = ""
-        code = add_pending_social("Facebook", draft_text, image_b64, image_url, draft.get("content_id"))
+        code = add_pending_social("Facebook", draft_text, image_b64, image_url, draft.get("content_id"), video_url, "video" if video_url else "")
         media_note = " kèm ảnh" if draft.get("image_b64") else ""
         pending_image_note = "\nẢnh đang chờ tạo thủ công nên lệnh này sẽ đăng text trước." if draft.get("image_status") == "pending_manual_image" and not draft.get("image_b64") else ""
         media_note = " kèm ảnh" if image_b64 or image_url else media_note
-        if image_b64 or image_url:
+        media_note = " kèm video" if video_url else media_note
+        if image_b64 or image_url or video_url:
             pending_image_note = ""
         return {
             "text": f"Mình sẽ đăng bản nháp gần nhất{media_note} lên Facebook qua Composio.{pending_image_note}\nMã xác nhận: {code}\nMã hết hạn sau 15 phút.",
