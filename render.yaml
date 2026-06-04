@@ -57,6 +57,10 @@ services:
         value: FACEBOOK_CREATE_POST
       - key: COMPOSIO_FACEBOOK_PHOTO_ACTION_ID
         value: FACEBOOK_CREATE_PHOTO_POST
+      - key: COMPOSIO_FACEBOOK_VIDEO_ACTION_ID
+        sync: false
+      - key: MAX_SOCIAL_VIDEO_MB
+        value: "50"
       - key: COMPOSIO_LINKEDIN_POST_ACTION_ID
         sync: false
       - key: WEBHOOK_SECRET

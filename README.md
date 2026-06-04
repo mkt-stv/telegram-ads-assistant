@@ -24,6 +24,8 @@ Set these in Render:
 - `COMPOSIO_FACEBOOK_PAGE_ID`
 - `COMPOSIO_FACEBOOK_POST_ACTION_ID` = `FACEBOOK_CREATE_POST`
 - `COMPOSIO_FACEBOOK_PHOTO_ACTION_ID` = `FACEBOOK_CREATE_PHOTO_POST`
+- `COMPOSIO_FACEBOOK_VIDEO_ACTION_ID` = Facebook video upload/post action in Composio
+- `MAX_SOCIAL_VIDEO_MB` = max video download size before posting, default `50`
 - `WEBHOOK_SECRET`
 
 `WEBHOOK_SECRET` can be any long random string.
