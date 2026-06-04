@@ -2398,7 +2398,11 @@ def telegram(secret):
             return {"ok": True}
         answer_callback_query_async(callback.get("id"), "Dang xu ly")
         try:
-            process_callback_async(callback.get("data", ""))
+            result = handle_callback(callback.get("data", ""))
+            if result.get("buttons"):
+                send_telegram_buttons(result.get("text", ""), result.get("buttons"))
+            else:
+                send_telegram(result.get("text", ""))
         except Exception as exc:
             app.logger.exception("Could not enqueue Telegram callback")
             try:
@@ -2427,9 +2431,9 @@ def telegram(secret):
     try:
         reply = handle_text(text, async_sheet=True)
         if is_content_request_plain(strip_tone(text)):
-            send_telegram_buttons_async(reply, draft_action_buttons())
+            send_telegram_buttons(reply, draft_action_buttons())
         else:
-            send_telegram_async(reply)
+            send_telegram(reply)
     except Exception as exc:
         app.logger.exception("Could not process Telegram message")
         try:
