@@ -1057,6 +1057,21 @@ def remember_last_draft(chat_key, draft, async_write=True):
     write_bot_state("last_draft", LAST_DRAFT, async_write=async_write)
 
 
+def remember_pending_state(async_write=True):
+    save_state()
+    write_bot_state("pending", PENDING, async_write=async_write)
+
+
+def restore_pending_state():
+    if PENDING:
+        return PENDING
+    stored = read_bot_state("pending")
+    if isinstance(stored, dict) and stored:
+        PENDING.update(stored)
+        save_state()
+    return PENDING
+
+
 def restore_last_draft(chat_key):
     draft = normalize_draft(LAST_DRAFT.get(chat_key))
     if draft:
@@ -1762,7 +1777,7 @@ def settings_agent_handle(text):
 def add_pending(entity, entity_id, status):
     code = str(random.randint(1000, 9999))
     PENDING[code] = {"entity": entity, "id": entity_id, "status": status, "expires": time.time() + 900}
-    save_state()
+    remember_pending_state()
     return code
 
 
@@ -1775,7 +1790,7 @@ def add_pending_social(platform, text, image_b64=None):
         "image_b64": image_b64,
         "expires": time.time() + 900,
     }
-    save_state()
+    remember_pending_state()
     return code
 
 
@@ -1792,30 +1807,31 @@ def confirm(code):
 
 
 def confirm(code):
+    restore_pending_state()
     item = PENDING.get(code)
     if not item or item["expires"] < time.time():
         PENDING.pop(code, None)
-        save_state()
+        remember_pending_state()
         return "Mã CONFIRM không đúng hoặc đã hết hạn."
     if item.get("running"):
         return "Lệnh này đang được xử lý. Chờ kết quả trong giây lát."
     item["running"] = True
-    save_state()
+    remember_pending_state()
     try:
         if item.get("type") == "social_post":
             result = post_to_social(item["platform"], item["text"], item.get("image_b64"))
             PENDING.pop(code, None)
-            save_state()
+            remember_pending_state()
             return f"Đã gửi bài lên {item['platform']} qua Composio.\nKết quả: {json.dumps(result, ensure_ascii=False)[:1000]}"
         meta_post(item["id"], {"status": item["status"]})
         PENDING.pop(code, None)
-        save_state()
+        remember_pending_state()
         return f"Đã thực hiện: {item['entity']} {item['id']} -> {item['status']}"
     except Exception as exc:
         item["running"] = False
         item["last_error"] = str(exc)[:500]
         PENDING[code] = item
-        save_state()
+        remember_pending_state()
         raise
 
 
@@ -1831,7 +1847,7 @@ def handle_text(text, async_sheet=False):
         return confirm(plain.split()[-1])
     if plain in ["/cancel", "huy", "cancel"]:
         PENDING.clear()
-        save_state()
+        remember_pending_state()
         return "Đã hủy các lệnh đang chờ xác nhận."
     if plain in ["image prompt", "prompt anh", "lay prompt anh", "xem prompt anh"]:
         draft = restore_last_draft(chat_key)
@@ -1968,6 +1984,7 @@ def handle_text(text, async_sheet=False):
             return draft + "\n\nNếu muốn tạo ảnh minh họa, nhắn: tạo ảnh minh họa cho bài này\nNếu muốn đăng bài này, nhắn: đăng bài này lên Facebook" + sheet_note(sheet_error)
         if intent.get("intent") == "cancel":
             PENDING.clear()
+            remember_pending_state()
             return "Đã hủy các lệnh đang chờ xác nhận."
         if intent.get("intent") == "gemini_unavailable":
             return (
@@ -1983,7 +2000,7 @@ def handle_callback(data):
     chat_key = "default"
     if data == "draft:cancel":
         PENDING.clear()
-        save_state()
+        remember_pending_state()
         return {"text": "Đã hủy thao tác đang chờ.", "buttons": None}
 
     if data == "draft:create_image":
@@ -2456,6 +2473,19 @@ def debug_telegram_outbox(secret):
         abort(404)
     load_state()
     return {"ok": True, "outbox": TELEGRAM_OUTBOX[-15:]}, 200
+
+
+@app.get("/debug/bot-events/<secret>")
+def debug_bot_events(secret):
+    if secret != env("WEBHOOK_SECRET"):
+        abort(404)
+    try:
+        payload = google_sheets_batch_get(["Bot_Events!A1:F80"])
+        rows = parse_table(range_values_map(payload).get("Bot_Events", []))
+        return {"ok": True, "events": rows[-20:]}, 200
+    except Exception as exc:
+        app.logger.exception("Could not read bot events")
+        return {"ok": False, "error": str(exc)[:1000], "events": []}, 200
 
 
 @app.get("/debug/openai/<secret>")
