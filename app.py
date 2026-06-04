@@ -1016,6 +1016,58 @@ def google_sheets_add_sheet(sheet_name, rows=200, columns=20):
     return composio_execute("GOOGLESHEETS_ADD_SHEET", payload)
 
 
+def bot_state_key(name):
+    return f"bot_state:{name}"
+
+
+def write_bot_state(name, value, async_write=True):
+    row = [bot_state_key(name), json.dumps(value or {}, ensure_ascii=False)[:45000], now_text(), "1"]
+
+    def write_row():
+        google_sheets_write("Bot_State", [row], "A2")
+
+    if async_write:
+        run_background("bot-state-write", write_row)
+        return None
+    try:
+        write_row()
+        return None
+    except Exception as exc:
+        app.logger.exception("Could not write bot state")
+        return str(exc)
+
+
+def read_bot_state(name):
+    try:
+        payload = google_sheets_batch_get(["Bot_State!A1:D20"])
+        rows = parse_table(range_values_map(payload).get("Bot_State", []))
+        wanted = bot_state_key(name)
+        for row in rows:
+            if str(row.get("key", "")).strip() == wanted:
+                raw = row.get("value_json", "")
+                return json.loads(raw) if raw else {}
+    except Exception:
+        app.logger.exception("Could not read bot state")
+    return {}
+
+
+def remember_last_draft(chat_key, draft, async_write=True):
+    LAST_DRAFT[chat_key] = draft or {}
+    save_state()
+    write_bot_state("last_draft", LAST_DRAFT, async_write=async_write)
+
+
+def restore_last_draft(chat_key):
+    draft = normalize_draft(LAST_DRAFT.get(chat_key))
+    if draft:
+        return draft
+    stored = read_bot_state("last_draft")
+    if isinstance(stored, dict) and stored:
+        LAST_DRAFT.update(stored)
+        save_state()
+    return normalize_draft(LAST_DRAFT.get(chat_key))
+
+
 def now_text():
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -1782,7 +1834,7 @@ def handle_text(text, async_sheet=False):
         save_state()
         return "Đã hủy các lệnh đang chờ xác nhận."
     if plain in ["image prompt", "prompt anh", "lay prompt anh", "xem prompt anh"]:
-        draft = normalize_draft(LAST_DRAFT.get(chat_key))
+        draft = restore_last_draft(chat_key)
         prompt = draft.get("image_prompt")
         if not prompt:
             return "Chưa có image prompt nào. Hãy nhắn: tạo ảnh minh họa cho bài này"
@@ -1794,7 +1846,7 @@ def handle_text(text, async_sheet=False):
     if agent == "viral_formula_analyst":
         return gemini_analyze_viral_formula(text)
     if agent == "image_creator":
-        draft = normalize_draft(LAST_DRAFT.get(chat_key))
+        draft = restore_last_draft(chat_key)
         draft_text = draft.get("text", "")
         if is_generation_error(draft_text):
             draft_text = ""
@@ -1815,13 +1867,16 @@ def handle_text(text, async_sheet=False):
                 status="pending_manual_image",
                 async_write=async_sheet,
             )
-            LAST_DRAFT[chat_key] = {
-                "text": draft_text,
-                "image_prompt": image_prompt,
-                "image_status": "pending_manual_image",
-                "content_id": content_id,
-            }
-            save_state()
+            remember_last_draft(
+                chat_key,
+                {
+                    "text": draft_text,
+                    "image_prompt": image_prompt,
+                    "image_status": "pending_manual_image",
+                    "content_id": content_id,
+                },
+                async_write=async_sheet,
+            )
             return (
                 "Chưa tạo được ảnh bằng API nên đã chuyển sang hàng chờ tạo ảnh thủ công qua Codex/ChatGPT.\n\n"
                 f"Content ID: {content_id}\n\n"
@@ -1837,8 +1892,11 @@ def handle_text(text, async_sheet=False):
             status="needs_review",
             async_write=async_sheet,
         )
-        LAST_DRAFT[chat_key] = {"text": draft_text, "image_b64": image_b64, "image_prompt": image_prompt, "content_id": content_id}
-        save_state()
+        remember_last_draft(
+            chat_key,
+            {"text": draft_text, "image_b64": image_b64, "image_prompt": image_prompt, "content_id": content_id},
+            async_write=async_sheet,
+        )
         if draft_text and wants_new_draft:
             return "Đã gửi bài viết và ảnh minh họa. Nếu muốn đăng cả bài và ảnh, nhắn: đăng bài này lên Facebook" + sheet_note(sheet_error)
         if draft_text:
@@ -1853,12 +1911,11 @@ def handle_text(text, async_sheet=False):
     if is_content_request_plain(plain):
         draft = generate_content_text(text)
         content_id, sheet_error = append_content_record(topic=text, draft_text=draft, async_write=async_sheet)
-        LAST_DRAFT[chat_key] = {"text": draft, "content_id": content_id}
-        save_state()
+        remember_last_draft(chat_key, {"text": draft, "content_id": content_id}, async_write=async_sheet)
         return draft + "\n\nNếu muốn tạo ảnh minh họa, nhắn: tạo ảnh minh họa cho bài này\nNếu muốn đăng bài này, nhắn: đăng bài này lên Facebook" + sheet_note(sheet_error)
     if agent == "social_publisher" or any(x in plain for x in ["dang bai nay len facebook", "dang len facebook", "post bai nay len facebook", "up bai nay len facebook", "dang bai nay len linkedin", "dang len linkedin", "post bai", "up bai", "dang bai"]):
         platform = "LinkedIn" if "linkedin" in plain else "Facebook"
-        draft = normalize_draft(LAST_DRAFT.get(chat_key))
+        draft = restore_last_draft(chat_key)
         if not draft:
             return "Chưa có bản nháp nào để đăng. Hãy nhắn: tạo cho tôi một bài viết về ..."
         draft_text = draft.get("text", "")
@@ -1907,8 +1964,7 @@ def handle_text(text, async_sheet=False):
         if intent.get("intent") == "content":
             draft = generate_content_text(text)
             content_id, sheet_error = append_content_record(topic=text, draft_text=draft, async_write=async_sheet)
-            LAST_DRAFT[chat_key] = {"text": draft, "content_id": content_id}
-            save_state()
+            remember_last_draft(chat_key, {"text": draft, "content_id": content_id}, async_write=async_sheet)
             return draft + "\n\nNếu muốn tạo ảnh minh họa, nhắn: tạo ảnh minh họa cho bài này\nNếu muốn đăng bài này, nhắn: đăng bài này lên Facebook" + sheet_note(sheet_error)
         if intent.get("intent") == "cancel":
             PENDING.clear()
@@ -1931,7 +1987,7 @@ def handle_callback(data):
         return {"text": "Đã hủy thao tác đang chờ.", "buttons": None}
 
     if data == "draft:create_image":
-        draft = normalize_draft(LAST_DRAFT.get(chat_key))
+        draft = restore_last_draft(chat_key)
         if not draft.get("text"):
             return {"text": "Chưa có bài nháp nào để tạo ảnh. Hãy nhắn: Tạo 1 bài viết P1", "buttons": None}
         result_text = handle_text("tạo ảnh minh họa cho bài này", async_sheet=True)
@@ -1940,7 +1996,7 @@ def handle_callback(data):
         return {"text": result_text, "buttons": draft_action_buttons()}
 
     if data == "draft:post_facebook":
-        draft = normalize_draft(LAST_DRAFT.get(chat_key))
+        draft = restore_last_draft(chat_key)
         draft_text = draft.get("text", "")
         if not draft_text:
             return {"text": "Chưa có bài nháp nào để đăng. Hãy nhắn: Tạo 1 bài viết P1", "buttons": None}
