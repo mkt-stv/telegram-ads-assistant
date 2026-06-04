@@ -23,6 +23,8 @@ CONFIG_LOADED_AT = 0
 CONFIG_TTL_SECONDS = 300
 TELEGRAM_OUTBOX = []
 PROCESSED_UPDATES = set()
+LAST_STATE_SHEET_SYNC = 0
+STATE_LOCK = threading.RLock()
 LAST_CONFIG_SIGNATURE = ""
 CURRENT_CONFIG_SIGNATURE = ""
 CONFIG_WATCH_STARTED = False
@@ -129,44 +131,56 @@ def state_file():
 
 def load_state():
     global PENDING, LAST_DRAFT, RUNTIME_CONFIG, LAST_CONFIG_SIGNATURE, CURRENT_CONFIG_SIGNATURE, PROCESSED_UPDATES, TELEGRAM_OUTBOX
-    try:
-        with open(state_file(), "r", encoding="utf-8") as f:
-            payload = json.load(f)
-        PENDING = payload.get("pending", {})
-        LAST_DRAFT = payload.get("last_draft", {})
-        RUNTIME_CONFIG = payload.get("runtime_config", {})
-        LAST_CONFIG_SIGNATURE = payload.get("last_config_signature", "")
-        CURRENT_CONFIG_SIGNATURE = payload.get("current_config_signature", "")
-        PROCESSED_UPDATES = set(payload.get("processed_updates", []))
-        TELEGRAM_OUTBOX = payload.get("telegram_outbox", [])[-30:]
-    except Exception:
-        PENDING = {}
-        LAST_DRAFT = {}
-        RUNTIME_CONFIG = {}
-        LAST_CONFIG_SIGNATURE = ""
-        CURRENT_CONFIG_SIGNATURE = ""
-        PROCESSED_UPDATES = set()
-        TELEGRAM_OUTBOX = []
+    with STATE_LOCK:
+        path = state_file()
+        if not os.path.exists(path):
+            PENDING = {}
+            LAST_DRAFT = {}
+            RUNTIME_CONFIG = {}
+            LAST_CONFIG_SIGNATURE = ""
+            CURRENT_CONFIG_SIGNATURE = ""
+            PROCESSED_UPDATES = set()
+            TELEGRAM_OUTBOX = []
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            PENDING = payload.get("pending", {})
+            LAST_DRAFT = payload.get("last_draft", {})
+            RUNTIME_CONFIG = payload.get("runtime_config", {})
+            LAST_CONFIG_SIGNATURE = payload.get("last_config_signature", "")
+            CURRENT_CONFIG_SIGNATURE = payload.get("current_config_signature", "")
+            PROCESSED_UPDATES = set(payload.get("processed_updates", []))
+            TELEGRAM_OUTBOX = payload.get("telegram_outbox", [])[-30:]
+        except Exception:
+            app.logger.exception("Could not load bot state; keeping in-memory state")
 
 
 def save_state():
-    try:
-        with open(state_file(), "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "last_draft": LAST_DRAFT,
-                    "pending": PENDING,
-                    "runtime_config": RUNTIME_CONFIG,
-                    "last_config_signature": LAST_CONFIG_SIGNATURE,
-                    "current_config_signature": CURRENT_CONFIG_SIGNATURE,
-                    "processed_updates": list(PROCESSED_UPDATES)[-500:],
-                    "telegram_outbox": TELEGRAM_OUTBOX[-30:],
-                },
-                f,
-                ensure_ascii=False,
-            )
-    except Exception:
-        app.logger.exception("Could not save bot state")
+    with STATE_LOCK:
+        path = state_file()
+        tmp_path = f"{path}.tmp.{os.getpid()}.{threading.get_ident()}"
+        payload = {
+            "last_draft": LAST_DRAFT,
+            "pending": PENDING,
+            "runtime_config": RUNTIME_CONFIG,
+            "last_config_signature": LAST_CONFIG_SIGNATURE,
+            "current_config_signature": CURRENT_CONFIG_SIGNATURE,
+            "processed_updates": list(PROCESSED_UPDATES)[-500:],
+            "telegram_outbox": TELEGRAM_OUTBOX[-30:],
+        }
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False)
+            os.replace(tmp_path, path)
+        except Exception:
+            app.logger.exception("Could not save bot state")
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
 
 
 def parse_table(values):
@@ -576,6 +590,7 @@ def remember_telegram_send(kind, ok, status_code=None, preview="", error=""):
     )
     del TELEGRAM_OUTBOX[:-30]
     save_state()
+    append_bot_event(f"telegram_{kind}", "ok" if ok else "error", preview if ok else error, str(status_code or ""))
 
 
 def telegram_chunks(text, max_chars=3800):
@@ -931,7 +946,31 @@ def composio_execute(tool_slug, input_payload):
     )
     if not res.ok:
         raise RuntimeError(res.text)
-    return res.json()
+    payload = res.json()
+    if composio_payload_failed(payload):
+        raise RuntimeError(json.dumps(payload, ensure_ascii=False)[:1500])
+    return payload
+
+
+def composio_payload_failed(payload):
+    if not isinstance(payload, dict):
+        return False
+    failure_keys = ["error", "errors", "exception", "traceback"]
+    for key in failure_keys:
+        if payload.get(key):
+            return True
+    for key in ["successful", "success", "ok"]:
+        if key in payload and payload.get(key) is False:
+            return True
+    data = payload.get("data")
+    if isinstance(data, dict):
+        for key in failure_keys:
+            if data.get(key):
+                return True
+        for key in ["successful", "success", "ok"]:
+            if key in data and data.get(key) is False:
+                return True
+    return False
 
 
 def composio_tool_schema(tool_slug):
@@ -983,6 +1022,59 @@ def now_text():
 
 def new_record_id(prefix):
     return f"{prefix}_{int(time.time())}_{random.randint(1000, 9999)}"
+
+
+def append_bot_event(event_type, status="ok", detail="", ref_id="", async_write=True):
+    row = [new_record_id("event"), now_text(), event_type, status, ref_id, str(detail)[:3000]]
+
+    def write_event():
+        try:
+            google_sheets_append("Bot_Events", [row])
+        except Exception:
+            app.logger.exception("Could not append bot event")
+
+    if async_write:
+        run_background("bot-event-append", write_event)
+        return None
+    try:
+        write_event()
+        return None
+    except Exception as exc:
+        return str(exc)
+
+
+def enqueue_task(task_type, payload, source_update_id="", chat_id="", async_write=True):
+    task_id = new_record_id("task")
+    row = [
+        task_id,
+        source_update_id,
+        str(chat_id),
+        task_type,
+        json.dumps(payload or {}, ensure_ascii=False)[:10000],
+        "queued",
+        "",
+        "0",
+        "",
+        "",
+        now_text(),
+        now_text(),
+    ]
+
+    def write_task():
+        try:
+            google_sheets_append("Task_Queue", [row])
+            append_bot_event("task_queued", "ok", task_type, task_id)
+        except Exception:
+            app.logger.exception("Could not enqueue task")
+
+    if async_write:
+        run_background("task-queue-append", write_task)
+        return task_id, None
+    try:
+        write_task()
+        return task_id, None
+    except Exception as exc:
+        return task_id, str(exc)
 
 
 def append_content_record(topic, draft_text="", image_prompt="", stage="draft", status="needs_review", platform="facebook", async_write=False):
@@ -1647,6 +1739,34 @@ def confirm(code):
     return f"Đã thực hiện: {item['entity']} {item['id']} -> {item['status']}"
 
 
+def confirm(code):
+    item = PENDING.get(code)
+    if not item or item["expires"] < time.time():
+        PENDING.pop(code, None)
+        save_state()
+        return "Mã CONFIRM không đúng hoặc đã hết hạn."
+    if item.get("running"):
+        return "Lệnh này đang được xử lý. Chờ kết quả trong giây lát."
+    item["running"] = True
+    save_state()
+    try:
+        if item.get("type") == "social_post":
+            result = post_to_social(item["platform"], item["text"], item.get("image_b64"))
+            PENDING.pop(code, None)
+            save_state()
+            return f"Đã gửi bài lên {item['platform']} qua Composio.\nKết quả: {json.dumps(result, ensure_ascii=False)[:1000]}"
+        meta_post(item["id"], {"status": item["status"]})
+        PENDING.pop(code, None)
+        save_state()
+        return f"Đã thực hiện: {item['entity']} {item['id']} -> {item['status']}"
+    except Exception as exc:
+        item["running"] = False
+        item["last_error"] = str(exc)[:500]
+        PENDING[code] = item
+        save_state()
+        raise
+
+
 def handle_text(text, async_sheet=False):
     plain = strip_tone(text)
     chat_key = "default"
@@ -2005,6 +2125,48 @@ def debug_content_test(secret):
     return {"ok": error is None, "content_id": content_id, "error": error}, 200
 
 
+@app.get("/debug/task-queue-test/<secret>")
+def debug_task_queue_test(secret):
+    if secret != env("WEBHOOK_SECRET"):
+        abort(404)
+    task_id, error = enqueue_task(
+        "debug_test",
+        {"message": "Task queue write test", "created_at": now_text()},
+        source_update_id=f"debug:{int(time.time())}",
+        chat_id=env("TELEGRAM_CHAT_ID"),
+        async_write=False,
+    )
+    return {"ok": error is None, "task_id": task_id, "error": error}, 200
+
+
+@app.get("/debug/setup-state-tabs/<secret>")
+def debug_setup_state_tabs(secret):
+    if secret != env("WEBHOOK_SECRET"):
+        abort(404)
+    specs = {
+        "Bot_State": ["key", "value_json", "updated_at", "version"],
+        "Task_Queue": ["task_id", "source_update_id", "chat_id", "task_type", "payload_json", "status", "lease_until", "attempts", "result_preview", "error", "created_at", "updated_at"],
+        "Bot_Events": ["event_id", "created_at", "event_type", "status", "ref_id", "detail"],
+    }
+    results = []
+    for sheet_name, headers in specs.items():
+        item = {"sheet": sheet_name}
+        try:
+            google_sheets_add_sheet(sheet_name, rows=500, columns=max(8, len(headers)))
+            item["created"] = True
+        except Exception as exc:
+            item["created"] = False
+            item["create_error"] = str(exc)[:250]
+        try:
+            google_sheets_write(sheet_name, [headers], "A1")
+            item["headers_written"] = True
+        except Exception as exc:
+            item["headers_written"] = False
+            item["write_error"] = str(exc)[:300]
+        results.append(item)
+    return {"ok": all(item.get("headers_written") for item in results), "results": results}, 200
+
+
 @app.get("/debug/setup-config-tabs/<secret>")
 def debug_setup_config_tabs(secret):
     if secret != env("WEBHOOK_SECRET"):
@@ -2047,6 +2209,18 @@ def debug_setup_config_tabs(secret):
         },
         "Settings_Changes": {
             "headers": ["change_id", "setting_type", "value", "note", "source", "status", "updated_at"],
+            "rows": [],
+        },
+        "Bot_State": {
+            "headers": ["key", "value_json", "updated_at", "version"],
+            "rows": [],
+        },
+        "Task_Queue": {
+            "headers": ["task_id", "source_update_id", "chat_id", "task_type", "payload_json", "status", "lease_until", "attempts", "result_preview", "error", "created_at", "updated_at"],
+            "rows": [],
+        },
+        "Bot_Events": {
+            "headers": ["event_id", "created_at", "event_type", "status", "ref_id", "detail"],
             "rows": [],
         },
     }
