@@ -752,6 +752,113 @@ def google_drive_download_url(url):
     return url
 
 
+def extract_urls(text):
+    return re.findall(r"https?://[^\s<>\"]+", text or "")
+
+
+def looks_like_image_url(url):
+    lowered = (url or "").lower()
+    return (
+        "drive.google.com" in lowered
+        or "docs.google.com" in lowered
+        or lowered.endswith((".png", ".jpg", ".jpeg", ".webp"))
+    )
+
+
+def normalize_image_bytes(image_bytes, max_width=1600, max_height=2000):
+    image = Image.open(io.BytesIO(image_bytes))
+    image.thumbnail((max_width, max_height), Image.LANCZOS)
+    out = io.BytesIO()
+    if image.mode not in ["RGB", "RGBA"]:
+        image = image.convert("RGB")
+    if image.mode == "RGBA":
+        bg = Image.new("RGB", image.size, (255, 255, 255))
+        bg.paste(image, mask=image.getchannel("A"))
+        image = bg
+    image.save(out, format="PNG", optimize=True)
+    return out.getvalue()
+
+
+def download_image_from_url(url):
+    if not looks_like_image_url(url):
+        raise RuntimeError("Link không giống link ảnh hoặc link Google Drive.")
+    download_url = google_drive_download_url(url)
+    res = requests.get(download_url, timeout=45)
+    res.raise_for_status()
+    content_type = (res.headers.get("Content-Type") or "").lower()
+    if "text/html" in content_type and "drive.google.com" in download_url:
+        raise RuntimeError("Google Drive chưa cho tải trực tiếp. Hãy bật quyền Anyone with the link can view.")
+    return apply_brand_logo_overlay(normalize_image_bytes(res.content))
+
+
+def attach_image_to_draft(chat_key, image_url, source="manual_link", async_sheet=True):
+    draft = restore_last_draft(chat_key)
+    if not draft.get("text"):
+        raise RuntimeError("Chưa có bài nháp nào để gắn ảnh. Hãy tạo bài trước.")
+    image_bytes = download_image_from_url(image_url)
+    draft.pop("image_b64", None)
+    draft["image_url"] = image_url
+    draft["image_status"] = "image_ready"
+    draft["image_source"] = source
+    remember_last_draft(chat_key, draft, async_write=async_sheet)
+    append_content_record(
+        topic=f"{source}: {image_url}",
+        draft_text=draft.get("text", ""),
+        image_prompt=draft.get("image_prompt", ""),
+        stage="image_ready",
+        status="needs_review",
+        async_write=async_sheet,
+    )
+    return image_bytes, draft
+
+
+def find_image_url_in_content_sheet(draft):
+    try:
+        payload = google_sheets_batch_get(["Content!A1:Z500"])
+        rows = parse_table(range_values_map(payload).get("Content", []))
+    except Exception:
+        app.logger.exception("Could not read Content sheet for image URL")
+        return ""
+    if not rows:
+        return ""
+
+    content_id = str((draft or {}).get("content_id", "")).strip()
+    target = None
+    if content_id:
+        for row in rows:
+            row_ids = [
+                str(row.get(key, "")).strip()
+                for key in ["content_id", "record_id", "id", "Content ID", "Content_ID"]
+            ]
+            if content_id in row_ids:
+                target = row
+                break
+    if not target:
+        target = rows[-1]
+
+    preferred = ["image_url", "image_link", "media_url", "media_link", "drive_link", "manual_image_url", "Ảnh", "Link ảnh"]
+    for key in preferred:
+        value = str(target.get(key, "")).strip()
+        if value:
+            for url in extract_urls(value) or [value]:
+                if looks_like_image_url(url):
+                    return url
+
+    for value in target.values():
+        for url in extract_urls(str(value)):
+            if looks_like_image_url(url):
+                return url
+    return ""
+
+
+def attach_image_from_content_sheet(chat_key, async_sheet=True):
+    draft = restore_last_draft(chat_key)
+    image_url = find_image_url_in_content_sheet(draft)
+    if not image_url:
+        raise RuntimeError("Chưa thấy link ảnh Drive trong dòng Content trên Sheet.")
+    return attach_image_to_draft(chat_key, image_url, source="content_sheet", async_sheet=async_sheet)
+
+
 def download_brand_logo():
     logo_url = workspace_config(refresh=False).get("brand_logo_url", "").strip()
     if not logo_url:
@@ -1020,11 +1127,31 @@ def bot_state_key(name):
     return f"bot_state:{name}"
 
 
+def durable_state_value(value):
+    if isinstance(value, dict):
+        cleaned = {}
+        for key, item in value.items():
+            if isinstance(item, dict):
+                item = dict(item)
+                if item.pop("image_b64", None):
+                    item["has_local_image_b64"] = True
+                cleaned[key] = item
+            else:
+                cleaned[key] = item
+        return cleaned
+    return value
+
+
+def bot_state_cell(name):
+    return {"last_draft": "A2", "pending": "A3"}.get(name, "A20")
+
+
 def write_bot_state(name, value, async_write=True):
-    row = [bot_state_key(name), json.dumps(value or {}, ensure_ascii=False)[:45000], now_text(), "1"]
+    state_value = durable_state_value(value or {})
+    row = [bot_state_key(name), json.dumps(state_value, ensure_ascii=False), now_text(), "1"]
 
     def write_row():
-        google_sheets_write("Bot_State", [row], "A2")
+        google_sheets_write("Bot_State", [row], bot_state_cell(name))
 
     if async_write:
         run_background("bot-state-write", write_row)
@@ -1238,12 +1365,16 @@ def composio_upload_file(file_bytes, filename, mimetype, toolkit_slug, tool_slug
     return {"name": filename, "mimetype": mimetype, "s3key": s3key}
 
 
-def post_to_social(platform, text, image_b64=None):
+def post_to_social(platform, text, image_b64=None, image_url=None):
     platform_key = strip_tone(platform).upper()
     if "FACEBOOK" in platform_key:
+        image_bytes = None
         if image_b64:
-            action_id = os.environ.get("COMPOSIO_FACEBOOK_PHOTO_ACTION_ID", "FACEBOOK_CREATE_PHOTO_POST")
             image_bytes = base64.b64decode(image_b64)
+        elif image_url:
+            image_bytes = download_image_from_url(image_url)
+        if image_bytes:
+            action_id = os.environ.get("COMPOSIO_FACEBOOK_PHOTO_ACTION_ID", "FACEBOOK_CREATE_PHOTO_POST")
             photo = composio_upload_file(image_bytes, "telegram-post.png", "image/png", "facebook", action_id)
             default_payload = {
                 "page_id": env("COMPOSIO_FACEBOOK_PAGE_ID"),
@@ -1273,6 +1404,11 @@ def post_to_social(platform, text, image_b64=None):
 
     if payload_json:
         payload = json.loads(payload_json.replace("{text}", text))
+        if "FACEBOOK" in platform_key and image_bytes:
+            payload.setdefault("photo", photo)
+            payload.setdefault("message", text)
+            if env("COMPOSIO_FACEBOOK_PAGE_ID"):
+                payload.setdefault("page_id", env("COMPOSIO_FACEBOOK_PAGE_ID"))
     else:
         payload = default_payload
     return composio_execute(action_id, payload)
@@ -1781,13 +1917,15 @@ def add_pending(entity, entity_id, status):
     return code
 
 
-def add_pending_social(platform, text, image_b64=None):
+def add_pending_social(platform, text, image_b64=None, image_url=None, content_id=None):
     code = str(random.randint(1000, 9999))
     PENDING[code] = {
         "type": "social_post",
         "platform": platform,
         "text": text,
         "image_b64": image_b64,
+        "image_url": image_url,
+        "content_id": content_id,
         "expires": time.time() + 900,
     }
     remember_pending_state()
@@ -1800,7 +1938,7 @@ def confirm(code):
     if not item or item["expires"] < time.time():
         return "Mã CONFIRM không đúng hoặc đã hết hạn."
     if item.get("type") == "social_post":
-        result = post_to_social(item["platform"], item["text"], item.get("image_b64"))
+        result = post_to_social(item["platform"], item["text"], item.get("image_b64"), item.get("image_url"))
         return f"Đã gửi bài lên {item['platform']} qua Composio.\nKết quả: {json.dumps(result, ensure_ascii=False)[:1000]}"
     meta_post(item["id"], {"status": item["status"]})
     return f"Đã thực hiện: {item['entity']} {item['id']} -> {item['status']}"
@@ -1819,7 +1957,7 @@ def confirm(code):
     remember_pending_state()
     try:
         if item.get("type") == "social_post":
-            result = post_to_social(item["platform"], item["text"], item.get("image_b64"))
+            result = post_to_social(item["platform"], item["text"], item.get("image_b64"), item.get("image_url"))
             PENDING.pop(code, None)
             remember_pending_state()
             return f"Đã gửi bài lên {item['platform']} qua Composio.\nKết quả: {json.dumps(result, ensure_ascii=False)[:1000]}"
@@ -1855,6 +1993,22 @@ def handle_text(text, async_sheet=False):
         if not prompt:
             return "Chưa có image prompt nào. Hãy nhắn: tạo ảnh minh họa cho bài này"
         return f"Image prompt hiện tại:\n{prompt[:2500]}"
+    if any(x in plain for x in ["gan anh tu sheet", "lay anh tu sheet", "cap nhat anh tu sheet", "gan hinh tu sheet", "lay hinh tu sheet"]):
+        try:
+            image_bytes, draft = attach_image_from_content_sheet(chat_key, async_sheet=async_sheet)
+            send_telegram_photo(image_bytes, "Đã lấy ảnh từ Sheet và gắn vào bài nháp gần nhất.")
+            return "Đã gắn ảnh từ Sheet vào bài nháp. Bây giờ có thể bấm Đăng Facebook để tạo mã duyệt."
+        except Exception as exc:
+            return f"Chưa gắn được ảnh từ Sheet: {exc}"
+    if any(x in plain for x in ["gan anh", "gan hinh", "cap nhat anh", "them anh", "dung anh nay"]):
+        urls = [url for url in extract_urls(text) if looks_like_image_url(url)]
+        if urls:
+            try:
+                image_bytes, draft = attach_image_to_draft(chat_key, urls[0], source="telegram_link", async_sheet=async_sheet)
+                send_telegram_photo(image_bytes, "Đã gắn ảnh này vào bài nháp gần nhất.")
+                return "Đã gắn ảnh vào bài nháp. Bây giờ có thể bấm Đăng Facebook để tạo mã duyệt."
+            except Exception as exc:
+                return f"Chưa gắn được ảnh: {exc}"
     if agent == "settings_agent":
         return settings_agent_handle(text)
     if agent == "viral_researcher":
@@ -1936,10 +2090,19 @@ def handle_text(text, async_sheet=False):
             return "Chưa có bản nháp nào để đăng. Hãy nhắn: tạo cho tôi một bài viết về ..."
         draft_text = draft.get("text", "")
         image_b64 = draft.get("image_b64")
-        code = add_pending_social(platform, draft_text, image_b64)
-        media_note = " kèm ảnh" if image_b64 else ""
+        image_url = draft.get("image_url")
+        if not image_b64 and not image_url:
+            try:
+                _, draft = attach_image_from_content_sheet(chat_key, async_sheet=async_sheet)
+                image_b64 = draft.get("image_b64")
+                image_url = draft.get("image_url")
+            except Exception:
+                image_b64 = ""
+                image_url = ""
+        code = add_pending_social(platform, draft_text, image_b64, image_url, draft.get("content_id"))
+        media_note = " kèm ảnh" if image_b64 or image_url else ""
         pending_image_note = ""
-        if draft.get("image_status") == "pending_manual_image" and not image_b64:
+        if draft.get("image_status") == "pending_manual_image" and not image_b64 and not image_url:
             pending_image_note = "\nẢnh đang chờ tạo thủ công nên lệnh này sẽ đăng text trước."
         return f"Mình sẽ đăng bản nháp gần nhất{media_note} lên {platform} qua Composio.{pending_image_note}\nGửi: CONFIRM {code}\nMã hết hạn sau 15 phút."
     if any(x in plain for x in ["campaign", "chien dich"]) and not any(x in plain for x in ["dung", "tat", "bat", "pause", "resume"]):
@@ -2017,9 +2180,22 @@ def handle_callback(data):
         draft_text = draft.get("text", "")
         if not draft_text:
             return {"text": "Chưa có bài nháp nào để đăng. Hãy nhắn: Tạo 1 bài viết P1", "buttons": None}
-        code = add_pending_social("Facebook", draft_text, draft.get("image_b64"))
+        image_b64 = draft.get("image_b64")
+        image_url = draft.get("image_url")
+        if not image_b64 and not image_url:
+            try:
+                _, draft = attach_image_from_content_sheet(chat_key, async_sheet=True)
+                image_b64 = draft.get("image_b64")
+                image_url = draft.get("image_url")
+            except Exception:
+                image_b64 = ""
+                image_url = ""
+        code = add_pending_social("Facebook", draft_text, image_b64, image_url, draft.get("content_id"))
         media_note = " kèm ảnh" if draft.get("image_b64") else ""
         pending_image_note = "\nẢnh đang chờ tạo thủ công nên lệnh này sẽ đăng text trước." if draft.get("image_status") == "pending_manual_image" and not draft.get("image_b64") else ""
+        media_note = " kèm ảnh" if image_b64 or image_url else media_note
+        if image_b64 or image_url:
+            pending_image_note = ""
         return {
             "text": f"Mình sẽ đăng bản nháp gần nhất{media_note} lên Facebook qua Composio.{pending_image_note}\nMã xác nhận: {code}\nMã hết hạn sau 15 phút.",
             "buttons": confirm_buttons(code),
