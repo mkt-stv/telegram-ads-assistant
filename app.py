@@ -684,6 +684,20 @@ def send_telegram_photo(image_bytes, caption=""):
         raise
 
 
+def run_background(name, target, *args, **kwargs):
+    thread = threading.Thread(target=target, args=args, kwargs=kwargs, name=name, daemon=True)
+    thread.start()
+    return thread
+
+
+def send_telegram_async(text):
+    return run_background("telegram-send-message", send_telegram, text)
+
+
+def send_telegram_buttons_async(text, buttons):
+    return run_background("telegram-send-buttons", send_telegram_buttons, text, buttons)
+
+
 def google_drive_download_url(url):
     if not url:
         return ""
@@ -2361,9 +2375,9 @@ def telegram(secret):
         try:
             result = handle_callback(callback.get("data", ""))
             if result.get("buttons"):
-                send_telegram_buttons(result.get("text", ""), result.get("buttons"))
+                send_telegram_buttons_async(result.get("text", ""), result.get("buttons"))
             else:
-                send_telegram(result.get("text", ""))
+                send_telegram_async(result.get("text", ""))
         except Exception as exc:
             app.logger.exception("Could not process Telegram callback")
             try:
@@ -2380,11 +2394,11 @@ def telegram(secret):
     if not text:
         return {"ok": True}
     try:
-        reply = handle_text(text)
+        reply = handle_text(text, async_sheet=True)
         if is_content_request_plain(strip_tone(text)):
-            send_telegram_buttons(reply, draft_action_buttons())
+            send_telegram_buttons_async(reply, draft_action_buttons())
         else:
-            send_telegram(reply)
+            send_telegram_async(reply)
     except Exception as exc:
         app.logger.exception("Could not process Telegram message")
         try:
