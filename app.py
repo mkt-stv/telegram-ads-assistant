@@ -815,7 +815,8 @@ def attach_image_to_draft(chat_key, image_url, source="manual_link", async_sheet
 def find_image_url_in_content_sheet(draft):
     try:
         payload = google_sheets_batch_get(["Content!A1:Z500"])
-        rows = parse_table(range_values_map(payload).get("Content", []))
+        values = range_values_map(payload).get("Content", [])
+        rows = parse_table(values)
     except Exception:
         app.logger.exception("Could not read Content sheet for image URL")
         return ""
@@ -837,6 +838,38 @@ def find_image_url_in_content_sheet(draft):
         target = rows[-1]
 
     preferred = ["image_url", "image_link", "media_url", "media_link", "drive_link", "manual_image_url", "Ảnh", "Link ảnh"]
+
+    def find_in_row(row):
+        if not row:
+            return ""
+        for key in preferred:
+            value = str(row.get(key, "")).strip()
+            if value:
+                for url in extract_urls(value) or [value]:
+                    if looks_like_image_url(url):
+                        return url
+        for value in row.values():
+            for url in extract_urls(str(value)):
+                if looks_like_image_url(url):
+                    return url
+        return ""
+
+    found = find_in_row(target)
+    if found:
+        return found
+
+    for row in reversed(rows):
+        found = find_in_row(row)
+        if found:
+            return found
+
+    raw_rows = values[1:] if len(values) > 1 else values
+    for raw in reversed(raw_rows):
+        for value in raw:
+            for url in extract_urls(str(value)):
+                if looks_like_image_url(url):
+                    return url
+
     for key in preferred:
         value = str(target.get(key, "")).strip()
         if value:
