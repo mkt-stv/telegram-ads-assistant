@@ -544,6 +544,15 @@ def fallback_generate_text(user_text):
     return clean_generated_post("\n".join(body))
 
 
+def generate_content_text(user_text):
+    if requested_pillar_id(user_text):
+        return fallback_generate_text(user_text)
+    draft = gemini_generate_text(user_text)
+    if is_generation_error(draft):
+        return fallback_generate_text(user_text)
+    return draft
+
+
 def remember_telegram_send(kind, ok, status_code=None, preview="", error=""):
     TELEGRAM_OUTBOX.append(
         {
@@ -1613,9 +1622,7 @@ def handle_text(text):
             draft_text = ""
         wants_new_draft = is_content_request_plain(plain)
         if wants_new_draft:
-            draft_text = gemini_generate_text(text)
-            if is_generation_error(draft_text):
-                draft_text = fallback_generate_text(text)
+            draft_text = generate_content_text(text)
         elif not draft_text:
             return "Chưa có bài nháp nào để tạo ảnh. Hãy nhắn: Tạo 1 bài viết P1"
         image_prompt = image_prompt_from_text(text, draft_text)
@@ -1664,9 +1671,7 @@ def handle_text(text):
     if any(x in plain for x in ["bao cao", "report", "ads hom nay", "ads hnay", "ads hom qua", "tinh hinh ads", "ads the nao"]):
         return report_text(text)
     if is_content_request_plain(plain):
-        draft = gemini_generate_text(text)
-        if is_generation_error(draft):
-            draft = fallback_generate_text(text)
+        draft = generate_content_text(text)
         content_id, sheet_error = append_content_record(topic=text, draft_text=draft)
         LAST_DRAFT[chat_key] = {"text": draft, "content_id": content_id}
         save_state()
@@ -1720,9 +1725,7 @@ def handle_text(text):
         if intent.get("intent") == "help":
             return help_text()
         if intent.get("intent") == "content":
-            draft = gemini_generate_text(text)
-            if is_generation_error(draft):
-                draft = fallback_generate_text(text)
+            draft = generate_content_text(text)
             content_id, sheet_error = append_content_record(topic=text, draft_text=draft)
             LAST_DRAFT[chat_key] = {"text": draft, "content_id": content_id}
             save_state()
