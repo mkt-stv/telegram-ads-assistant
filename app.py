@@ -2143,28 +2143,32 @@ def debug_task_queue_test(secret):
 def debug_setup_state_tabs(secret):
     if secret != env("WEBHOOK_SECRET"):
         abort(404)
-    specs = {
-        "Bot_State": ["key", "value_json", "updated_at", "version"],
-        "Task_Queue": ["task_id", "source_update_id", "chat_id", "task_type", "payload_json", "status", "lease_until", "attempts", "result_preview", "error", "created_at", "updated_at"],
-        "Bot_Events": ["event_id", "created_at", "event_type", "status", "ref_id", "detail"],
-    }
-    results = []
-    for sheet_name, headers in specs.items():
-        item = {"sheet": sheet_name}
-        try:
-            google_sheets_add_sheet(sheet_name, rows=500, columns=max(8, len(headers)))
-            item["created"] = True
-        except Exception as exc:
-            item["created"] = False
-            item["create_error"] = str(exc)[:250]
-        try:
-            google_sheets_write(sheet_name, [headers], "A1")
-            item["headers_written"] = True
-        except Exception as exc:
-            item["headers_written"] = False
-            item["write_error"] = str(exc)[:300]
-        results.append(item)
-    return {"ok": all(item.get("headers_written") for item in results), "results": results}, 200
+    try:
+        specs = {
+            "Bot_State": ["key", "value_json", "updated_at", "version"],
+            "Task_Queue": ["task_id", "source_update_id", "chat_id", "task_type", "payload_json", "status", "lease_until", "attempts", "result_preview", "error", "created_at", "updated_at"],
+            "Bot_Events": ["event_id", "created_at", "event_type", "status", "ref_id", "detail"],
+        }
+        results = []
+        for sheet_name, headers in specs.items():
+            item = {"sheet": sheet_name}
+            try:
+                google_sheets_add_sheet(sheet_name, rows=500, columns=max(8, len(headers)))
+                item["created"] = True
+            except Exception as exc:
+                item["created"] = False
+                item["create_error"] = str(exc)[:250]
+            try:
+                google_sheets_write(sheet_name, [headers], "A1")
+                item["headers_written"] = True
+            except Exception as exc:
+                item["headers_written"] = False
+                item["write_error"] = str(exc)[:300]
+            results.append(item)
+        return {"ok": all(item.get("headers_written") for item in results), "results": results}, 200
+    except Exception as exc:
+        app.logger.exception("Could not setup durable bot tabs")
+        return {"ok": False, "error": str(exc)[:1000], "results": []}, 200
 
 
 @app.get("/debug/setup-config-tabs/<secret>")
