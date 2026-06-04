@@ -940,7 +940,7 @@ def new_record_id(prefix):
     return f"{prefix}_{int(time.time())}_{random.randint(1000, 9999)}"
 
 
-def append_content_record(topic, draft_text="", image_prompt="", stage="draft", status="needs_review", platform="facebook"):
+def append_content_record(topic, draft_text="", image_prompt="", stage="draft", status="needs_review", platform="facebook", async_write=False):
     record_id = new_record_id("content")
     today = date.today().isoformat()
     row = [
@@ -962,6 +962,15 @@ def append_content_record(topic, draft_text="", image_prompt="", stage="draft", 
         status,
         now_text(),
     ]
+    if async_write:
+        def write_later():
+            try:
+                google_sheets_append("Content", [row])
+            except Exception:
+                app.logger.exception("Could not append content record async")
+
+        threading.Thread(target=write_later, name="content-sheet-append", daemon=True).start()
+        return record_id, None
     try:
         google_sheets_append("Content", [row])
         return record_id, None
@@ -1590,7 +1599,7 @@ def confirm(code):
     return f"Đã thực hiện: {item['entity']} {item['id']} -> {item['status']}"
 
 
-def handle_text(text):
+def handle_text(text, async_sheet=False):
     plain = strip_tone(text)
     chat_key = "default"
     agent = agent_manager_route(text)
@@ -1635,6 +1644,7 @@ def handle_text(text):
                 image_prompt=image_prompt,
                 stage="image_pending",
                 status="pending_manual_image",
+                async_write=async_sheet,
             )
             LAST_DRAFT[chat_key] = {
                 "text": draft_text,
@@ -1656,6 +1666,7 @@ def handle_text(text):
             image_prompt=image_prompt,
             stage="image_ready",
             status="needs_review",
+            async_write=async_sheet,
         )
         LAST_DRAFT[chat_key] = {"text": draft_text, "image_b64": image_b64, "image_prompt": image_prompt, "content_id": content_id}
         save_state()
@@ -1672,7 +1683,7 @@ def handle_text(text):
         return report_text(text)
     if is_content_request_plain(plain):
         draft = generate_content_text(text)
-        content_id, sheet_error = append_content_record(topic=text, draft_text=draft)
+        content_id, sheet_error = append_content_record(topic=text, draft_text=draft, async_write=async_sheet)
         LAST_DRAFT[chat_key] = {"text": draft, "content_id": content_id}
         save_state()
         return draft + "\n\nNếu muốn tạo ảnh minh họa, nhắn: tạo ảnh minh họa cho bài này\nNếu muốn đăng bài này, nhắn: đăng bài này lên Facebook" + sheet_note(sheet_error)
@@ -1726,7 +1737,7 @@ def handle_text(text):
             return help_text()
         if intent.get("intent") == "content":
             draft = generate_content_text(text)
-            content_id, sheet_error = append_content_record(topic=text, draft_text=draft)
+            content_id, sheet_error = append_content_record(topic=text, draft_text=draft, async_write=async_sheet)
             LAST_DRAFT[chat_key] = {"text": draft, "content_id": content_id}
             save_state()
             return draft + "\n\nNếu muốn tạo ảnh minh họa, nhắn: tạo ảnh minh họa cho bài này\nNếu muốn đăng bài này, nhắn: đăng bài này lên Facebook" + sheet_note(sheet_error)
@@ -1753,7 +1764,7 @@ def handle_callback(data):
         draft = normalize_draft(LAST_DRAFT.get(chat_key))
         if not draft.get("text"):
             return {"text": "Chưa có bài nháp nào để tạo ảnh. Hãy nhắn: Tạo 1 bài viết P1", "buttons": None}
-        result_text = handle_text("tạo ảnh minh họa cho bài này")
+        result_text = handle_text("tạo ảnh minh họa cho bài này", async_sheet=True)
         if "Image prompt:" not in result_text and not result_text.startswith("Chưa"):
             result_text = "Đã tạo ảnh minh họa cho bài gần nhất. Nếu muốn đăng kèm bài và ảnh, bấm Đăng Facebook."
         return {"text": result_text, "buttons": draft_action_buttons()}
@@ -2148,7 +2159,7 @@ def debug_handle(secret):
     if not text:
         return {"ok": False, "error": "missing text"}, 200
     try:
-        reply = handle_text(text)
+        reply = handle_text(text, async_sheet=True)
         return safe_json_value({"ok": True, "reply": reply}), 200
     except Exception as exc:
         app.logger.exception("Could not handle debug text")
