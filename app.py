@@ -3315,6 +3315,20 @@ def debug_scheduler_seed(secret):
         return {"ok": False, "content_id": content_id, "error": str(exc)[:1000]}, 200
 
 
+@app.get("/debug/parse-schedule/<secret>")
+def debug_parse_schedule(secret):
+    if secret != env("WEBHOOK_SECRET"):
+        abort(404)
+    value = request.args.get("value", "")
+    parsed = parse_scheduled_at(value)
+    return {
+        "ok": parsed is not None,
+        "value": value,
+        "repr": repr(value),
+        "parsed": parsed.strftime("%Y-%m-%d %H:%M:%S") if parsed else "",
+    }, 200
+
+
 @app.get("/debug/task-queue-test/<secret>")
 def debug_task_queue_test(secret):
     if secret != env("WEBHOOK_SECRET"):
