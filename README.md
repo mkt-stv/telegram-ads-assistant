@@ -26,6 +26,7 @@ Set these in Render:
 - `COMPOSIO_FACEBOOK_PHOTO_ACTION_ID` = `FACEBOOK_CREATE_PHOTO_POST`
 - `COMPOSIO_FACEBOOK_VIDEO_ACTION_ID` = Facebook video upload/post action in Composio
 - `MAX_SOCIAL_VIDEO_MB` = max video download size before posting, default `50`
+- `AUTO_POST_SCHEDULED_CONTENT` = set `true` only if scheduled posts should publish without Telegram approval
 - `WEBHOOK_SECRET`
 
 `WEBHOOK_SECRET` can be any long random string.
@@ -65,6 +66,23 @@ python set_telegram_webhook.py https://your-service.onrender.com
 - `CONFIRM 1234`
 
 Mutating commands require `CONFIRM`.
+
+## Scheduler
+
+Default scheduler mode is safe: it scans due rows in `Content`, sends Telegram approval buttons, and does not publish until confirmation.
+
+- Dry-run: `GET /cron/scheduler-tick/<secret>?dry_run=1`
+- Create Telegram approval for due rows: `GET /cron/scheduler-tick/<secret>?dry_run=0`
+- Auto-post mode requires `AUTO_POST_SCHEDULED_CONTENT=true` and `auto_post=1`.
+
+Content rows need at least these columns:
+
+- `content_id`
+- `scheduled_at`
+- `platform`
+- `draft_text`
+- `status`
+- Optional: `media_type`, `media_url`, `image_url`, `video_url`, `stage`, `post_url`, `posted_at`, `last_error`.
 
 ## Agent commands
 

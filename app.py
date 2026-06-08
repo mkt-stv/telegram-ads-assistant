@@ -8,7 +8,7 @@ import re
 import threading
 import time
 import unicodedata
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import requests
 from PIL import Image, ImageDraw, ImageFont
@@ -194,6 +194,21 @@ def parse_table(values):
             row[header] = raw[idx] if idx < len(raw) else ""
         rows.append(row)
     return rows
+
+
+def normalize_header_name(value):
+    plain = strip_tone(str(value or "")).strip().lower()
+    plain = re.sub(r"[^a-z0-9]+", "_", plain).strip("_")
+    return plain
+
+
+def column_letter(index):
+    index += 1
+    letters = ""
+    while index:
+        index, remainder = divmod(index - 1, 26)
+        letters = chr(65 + remainder) + letters
+    return letters
 
 
 def find_value_ranges(payload):
@@ -1689,6 +1704,305 @@ def append_learning(source, finding, recommendation, confidence="medium", status
         return str(exc)
 
 
+CONTENT_COLUMN_ALIASES = {
+    "content_id": ["content_id", "record_id", "id", "content id", "ma bai", "ma noi dung"],
+    "scheduled_at": ["scheduled_at", "schedule_at", "scheduled_time", "schedule_time", "lich_dang", "thoi_gian_dang", "gio_dang"],
+    "platform": ["platform", "nen_tang", "kenh"],
+    "topic": ["topic", "chu_de", "title", "tieu_de", "pillar", "content_pillar"],
+    "draft_text": ["draft_text", "content", "noi_dung", "caption", "post_text", "bai_viet"],
+    "image_prompt": ["image_prompt", "prompt_anh", "prompt_tao_anh"],
+    "media_type": ["media_type", "loai_media", "loai_file", "type"],
+    "media_url": ["media_url", "media_link", "drive_link", "link_media", "link_file"],
+    "image_url": ["image_url", "image_link", "anh", "link_anh", "hinh", "link_hinh"],
+    "video_url": ["video_url", "video_link", "video", "link_video"],
+    "stage": ["stage", "giai_doan"],
+    "status": ["status", "trang_thai", "approval_status"],
+    "posted_at": ["posted_at", "posted_time", "thoi_gian_da_dang"],
+    "post_url": ["post_url", "posted_url", "link_bai_dang", "url_bai_dang"],
+    "result_preview": ["result_preview", "ket_qua", "composio_result"],
+    "last_error": ["last_error", "error", "loi"],
+    "updated_at": ["updated_at", "cap_nhat_luc"],
+}
+
+
+def content_header_index(headers, canonical):
+    aliases = {normalize_header_name(x) for x in CONTENT_COLUMN_ALIASES.get(canonical, [canonical])}
+    for idx, header in enumerate(headers or []):
+        if normalize_header_name(header) in aliases:
+            return idx
+    return None
+
+
+def content_row_value(row, headers, canonical, default=""):
+    idx = content_header_index(headers, canonical)
+    if idx is None or idx >= len(row):
+        return default
+    return str(row[idx] or "").strip()
+
+
+def read_content_sheet():
+    payload = google_sheets_batch_get(["Content!A1:AZ500"])
+    values = range_values_map(payload).get("Content", [])
+    headers = [str(x).strip() for x in values[0]] if values else []
+    rows = values[1:] if len(values) > 1 else []
+    return headers, rows
+
+
+def write_content_row_cells(row_number, headers, updates):
+    written = {}
+    missing = []
+    for canonical, value in updates.items():
+        idx = content_header_index(headers, canonical)
+        if idx is None:
+            missing.append(canonical)
+            continue
+        google_sheets_write("Content", [[value]], f"{column_letter(idx)}{row_number}")
+        written[canonical] = value
+    return {"written": written, "missing": missing}
+
+
+def update_content_by_id(content_id, updates):
+    if not content_id:
+        return {"ok": False, "error": "missing content_id"}
+    headers, rows = read_content_sheet()
+    for offset, row in enumerate(rows, start=2):
+        if content_row_value(row, headers, "content_id") == str(content_id):
+            result = write_content_row_cells(offset, headers, updates)
+            return {"ok": True, "row": offset, **result}
+    return {"ok": False, "error": f"content_id not found: {content_id}"}
+
+
+def append_posting_log(content_id, platform, media_type, status, result="", error=""):
+    row = [
+        new_record_id("post"),
+        str(content_id or ""),
+        platform,
+        media_type,
+        status,
+        json.dumps(result, ensure_ascii=False)[:5000] if not isinstance(result, str) else result[:5000],
+        str(error or "")[:1000],
+        now_text(),
+    ]
+    try:
+        google_sheets_append("Posting_Log", [row])
+        return None
+    except Exception as exc:
+        app.logger.exception("Could not append posting log")
+        return str(exc)
+
+
+def find_first_url_deep(value):
+    if isinstance(value, str):
+        urls = extract_urls(value)
+        return urls[0] if urls else ""
+    if isinstance(value, dict):
+        for key in ["post_url", "posted_url", "permalink_url", "url", "link"]:
+            found = find_first_url_deep(value.get(key))
+            if found:
+                return found
+        for item in value.values():
+            found = find_first_url_deep(item)
+            if found:
+                return found
+    if isinstance(value, list):
+        for item in value:
+            found = find_first_url_deep(item)
+            if found:
+                return found
+    return ""
+
+
+def bangkok_now():
+    return datetime.utcnow() + timedelta(hours=7)
+
+
+def parse_scheduled_at(value):
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    cleaned = raw.replace("T", " ").replace("Z", "").strip()
+    cleaned = re.sub(r"\s+[+-]\d{2}:?\d{2}$", "", cleaned)
+    formats = [
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d",
+        "%d/%m/%Y %H:%M:%S",
+        "%d/%m/%Y %H:%M",
+        "%d/%m/%Y",
+    ]
+    for fmt in formats:
+        try:
+            return datetime.strptime(cleaned, fmt)
+        except ValueError:
+            pass
+    try:
+        return datetime.fromisoformat(cleaned)
+    except ValueError:
+        return None
+
+
+def scheduler_status_plain(value):
+    return strip_tone(str(value or "")).strip().replace(" ", "_")
+
+
+def is_scheduler_ready_status(value):
+    plain = scheduler_status_plain(value)
+    return plain in {
+        "scheduled",
+        "approved",
+        "ready",
+        "ready_to_post",
+        "duyet",
+        "da_duyet",
+        "cho_dang",
+        "waiting_schedule",
+    }
+
+
+def scheduled_media_from_row(row, headers):
+    media_type = explicit_media_type(content_row_value(row, headers, "media_type"))
+    image_url = content_row_value(row, headers, "image_url")
+    video_url = content_row_value(row, headers, "video_url")
+    media_url = content_row_value(row, headers, "media_url")
+    if not media_type:
+        if video_url or video_file_url(media_url):
+            media_type = "video"
+        elif image_url or image_file_url(media_url):
+            media_type = "image"
+    if media_type == "video" and not video_url:
+        video_url = media_url
+    if media_type == "image" and not image_url:
+        image_url = media_url
+    return media_type or "text", image_url, video_url
+
+
+def pending_code():
+    for _ in range(20):
+        code = str(random.randint(100000, 999999))
+        if code not in PENDING:
+            return code
+    return new_record_id("confirm")
+
+
+def process_due_content(limit=5, dry_run=True, auto_post=False):
+    headers, rows = read_content_sheet()
+    missing_required = [key for key in ["status", "scheduled_at", "draft_text"] if content_header_index(headers, key) is None]
+    if missing_required:
+        return {"ok": False, "error": "Content sheet thiếu cột bắt buộc.", "missing": missing_required}
+
+    now_dt = bangkok_now()
+    due = []
+    skipped = 0
+    processed = []
+    errors = []
+    for offset, row in enumerate(rows, start=2):
+        status = content_row_value(row, headers, "status")
+        if not is_scheduler_ready_status(status):
+            skipped += 1
+            continue
+        scheduled_at_raw = content_row_value(row, headers, "scheduled_at")
+        scheduled_at = parse_scheduled_at(scheduled_at_raw)
+        if not scheduled_at:
+            errors.append({"row": offset, "error": "scheduled_at không đọc được", "value": scheduled_at_raw})
+            continue
+        if scheduled_at > now_dt:
+            skipped += 1
+            continue
+        due.append((offset, row, scheduled_at))
+        if len(due) >= limit:
+            break
+
+    if dry_run:
+        return {
+            "ok": True,
+            "dry_run": True,
+            "now_bangkok": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            "due_count": len(due),
+            "skipped": skipped,
+            "errors": errors[:10],
+            "due": [
+                {
+                    "row": row_number,
+                    "content_id": content_row_value(row, headers, "content_id"),
+                    "scheduled_at": scheduled_at.strftime("%Y-%m-%d %H:%M:%S"),
+                    "status": content_row_value(row, headers, "status"),
+                    "platform": content_row_value(row, headers, "platform", "Facebook") or "Facebook",
+                    "media_type": scheduled_media_from_row(row, headers)[0],
+                    "preview": preview_text(content_row_value(row, headers, "draft_text"), 180),
+                }
+                for row_number, row, scheduled_at in due
+            ],
+        }
+
+    for row_number, row, scheduled_at in due:
+        content_id = content_row_value(row, headers, "content_id") or new_record_id("content")
+        platform = content_row_value(row, headers, "platform", "Facebook") or "Facebook"
+        draft_text = content_row_value(row, headers, "draft_text")
+        topic = content_row_value(row, headers, "topic")
+        media_type, image_url, video_url = scheduled_media_from_row(row, headers)
+        try:
+            if not draft_text:
+                draft_text = generate_content_text(topic or "Tạo 1 bài viết P1")
+                write_content_row_cells(row_number, headers, {"draft_text": draft_text, "updated_at": now_text()})
+            if auto_post:
+                result = post_to_social(platform, draft_text, image_url=image_url, video_url=video_url)
+                post_url = find_first_url_deep(result)
+                write_content_row_cells(
+                    row_number,
+                    headers,
+                    {
+                        "status": "posted",
+                        "stage": "posted",
+                        "posted_at": now_text(),
+                        "post_url": post_url,
+                        "result_preview": json.dumps(result, ensure_ascii=False)[:1000],
+                        "updated_at": now_text(),
+                    },
+                )
+                append_posting_log(content_id, platform, media_type, "posted", result)
+                append_bot_event("scheduler_posted", "ok", content_id, str(row_number))
+                processed.append({"row": row_number, "content_id": content_id, "status": "posted"})
+            else:
+                code = add_pending_social(platform, draft_text, None, image_url, content_id, video_url, media_type)
+                media_note = "kèm video" if video_url else "kèm ảnh" if image_url else "text-only"
+                send_telegram_buttons(
+                    (
+                        f"Bài đã đến lịch đăng.\n"
+                        f"Content ID: {content_id}\n"
+                        f"Nền tảng: {platform}\n"
+                        f"Media: {media_note}\n"
+                        f"Lịch: {scheduled_at.strftime('%Y-%m-%d %H:%M')}\n\n"
+                        f"{preview_text(draft_text, 1200)}\n\n"
+                        f"Mã xác nhận: {code}\nMã hết hạn sau 15 phút."
+                    ),
+                    confirm_buttons(code),
+                )
+                write_content_row_cells(
+                    row_number,
+                    headers,
+                    {"status": "pending_confirm", "stage": "waiting_approval", "result_preview": f"CONFIRM {code}", "updated_at": now_text()},
+                )
+                append_posting_log(content_id, platform, media_type, "pending_confirm", f"CONFIRM {code}")
+                append_bot_event("scheduler_pending_confirm", "ok", content_id, str(row_number))
+                processed.append({"row": row_number, "content_id": content_id, "status": "pending_confirm", "code": code})
+        except Exception as exc:
+            err = str(exc)[:500]
+            write_content_row_cells(row_number, headers, {"status": "failed", "last_error": err, "updated_at": now_text()})
+            append_posting_log(content_id, platform, media_type, "failed", "", err)
+            append_bot_event("scheduler_failed", "error", err, str(row_number))
+            errors.append({"row": row_number, "content_id": content_id, "error": err})
+
+    return {
+        "ok": not errors,
+        "dry_run": False,
+        "auto_post": auto_post,
+        "processed": processed,
+        "errors": errors,
+        "skipped": skipped,
+        "now_bangkok": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
 def append_settings_change(setting_type, value, note="", source="telegram"):
     row = [new_record_id("setting"), setting_type, value, note, source, "active", now_text()]
     try:
@@ -2300,14 +2614,14 @@ def settings_agent_handle(text):
 
 
 def add_pending(entity, entity_id, status):
-    code = str(random.randint(1000, 9999))
+    code = pending_code()
     PENDING[code] = {"entity": entity, "id": entity_id, "status": status, "expires": time.time() + 900}
     remember_pending_state()
     return code
 
 
 def add_pending_social(platform, text, image_b64=None, image_url=None, content_id=None, video_url=None, media_type=""):
-    code = str(random.randint(1000, 9999))
+    code = pending_code()
     PENDING[code] = {
         "type": "social_post",
         "platform": platform,
@@ -2365,10 +2679,72 @@ def confirm(code):
         raise
 
 
+def confirm(code):
+    with STATE_LOCK:
+        restore_pending_state()
+        item = PENDING.get(code)
+        if not item or item["expires"] < time.time():
+            PENDING.pop(code, None)
+            remember_pending_state()
+            return "Mã CONFIRM không đúng hoặc đã hết hạn."
+        if item.get("running"):
+            return "Lệnh này đang được xử lý. Chờ kết quả trong giây lát."
+        item["running"] = True
+        PENDING[code] = item
+        remember_pending_state()
+    try:
+        if item.get("type") == "social_post":
+            result = post_to_social(item["platform"], item["text"], item.get("image_b64"), item.get("image_url"), item.get("video_url"))
+            content_id = item.get("content_id")
+            media_type = item.get("media_type") or ("video" if item.get("video_url") else "image" if item.get("image_b64") or item.get("image_url") else "text")
+            post_url = find_first_url_deep(result)
+            append_posting_log(content_id, item["platform"], media_type, "posted", result)
+            if content_id:
+                update_content_by_id(
+                    content_id,
+                    {
+                        "status": "posted",
+                        "stage": "posted",
+                        "posted_at": now_text(),
+                        "post_url": post_url,
+                        "result_preview": json.dumps(result, ensure_ascii=False)[:1000],
+                        "updated_at": now_text(),
+                    },
+                )
+            append_bot_event("social_post_confirmed", "ok", content_id or item["platform"], code)
+            with STATE_LOCK:
+                PENDING.pop(code, None)
+                remember_pending_state()
+            return f"Đã gửi bài lên {item['platform']} qua Composio.\nKết quả: {json.dumps(result, ensure_ascii=False)[:1000]}"
+        meta_post(item["id"], {"status": item["status"]})
+        with STATE_LOCK:
+            PENDING.pop(code, None)
+            remember_pending_state()
+        return f"Đã thực hiện: {item['entity']} {item['id']} -> {item['status']}"
+    except Exception as exc:
+        err = str(exc)[:500]
+        if item.get("type") == "social_post":
+            append_posting_log(item.get("content_id"), item.get("platform", ""), item.get("media_type", ""), "failed", "", err)
+            if item.get("content_id"):
+                update_content_by_id(item.get("content_id"), {"status": "failed", "last_error": err, "updated_at": now_text()})
+        with STATE_LOCK:
+            item["running"] = False
+            item["last_error"] = err
+            PENDING[code] = item
+            remember_pending_state()
+        raise
+
+
 def handle_text(text, async_sheet=False):
     plain = strip_tone(text)
     chat_key = "default"
     agent = agent_manager_route(text)
+    if any(x in plain for x in ["kiem tra lich dang", "check lich dang", "scheduler dry run", "test scheduler"]):
+        result = process_due_content(limit=5, dry_run=True, auto_post=False)
+        return "Kết quả kiểm tra lịch đăng:\n" + json.dumps(result, ensure_ascii=False, indent=2)[:3000]
+    if any(x in plain for x in ["chay lich dang", "quet lich dang", "xu ly lich dang", "scheduler tick"]):
+        result = process_due_content(limit=5, dry_run=False, auto_post=False)
+        return "Đã chạy lịch đăng:\n" + json.dumps(result, ensure_ascii=False, indent=2)[:3000]
     if plain in ["/agents", "agents", "agent", "kien truc agent", "kien truc bot"]:
         return agents_text()
     if plain in ["/help", "help"]:
@@ -2638,6 +3014,27 @@ def health():
     return {"ok": True}
 
 
+@app.get("/cron/scheduler-tick/<secret>")
+def cron_scheduler_tick(secret):
+    if secret != env("WEBHOOK_SECRET"):
+        abort(404)
+    dry_run = request.args.get("dry_run", "1").lower() not in ["0", "false", "no"]
+    auto_post = request.args.get("auto_post", "0").lower() in ["1", "true", "yes"]
+    limit_raw = request.args.get("limit", "5")
+    try:
+        limit = max(1, min(20, int(limit_raw)))
+    except ValueError:
+        limit = 5
+    if auto_post and os.environ.get("AUTO_POST_SCHEDULED_CONTENT", "false").lower() not in ["1", "true", "yes", "on"]:
+        return {"ok": False, "error": "AUTO_POST_SCHEDULED_CONTENT chưa bật. Scheduler chỉ được tạo mã duyệt qua Telegram."}, 200
+    try:
+        return safe_json_value(process_due_content(limit=limit, dry_run=dry_run, auto_post=auto_post)), 200
+    except Exception as exc:
+        app.logger.exception("Scheduler tick failed")
+        append_bot_event("scheduler_tick_failed", "error", str(exc)[:500], "cron")
+        return {"ok": False, "error": str(exc)[:1000]}, 200
+
+
 @app.get("/debug/gemini/<secret>")
 def debug_gemini(secret):
     if secret != env("WEBHOOK_SECRET"):
@@ -2819,6 +3216,7 @@ def debug_setup_state_tabs(secret):
             "Bot_State": ["key", "value_json", "updated_at", "version"],
             "Task_Queue": ["task_id", "source_update_id", "chat_id", "task_type", "payload_json", "status", "lease_until", "attempts", "result_preview", "error", "created_at", "updated_at"],
             "Bot_Events": ["event_id", "created_at", "event_type", "status", "ref_id", "detail"],
+            "Posting_Log": ["post_event_id", "content_id", "platform", "media_type", "status", "result_json", "error", "created_at"],
         }
         results = []
         for sheet_name, headers in specs.items():
@@ -2896,6 +3294,10 @@ def debug_setup_config_tabs(secret):
         },
         "Bot_Events": {
             "headers": ["event_id", "created_at", "event_type", "status", "ref_id", "detail"],
+            "rows": [],
+        },
+        "Posting_Log": {
+            "headers": ["post_event_id", "content_id", "platform", "media_type", "status", "result_json", "error", "created_at"],
             "rows": [],
         },
     }
