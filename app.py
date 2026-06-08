@@ -1856,7 +1856,7 @@ def scheduled_at_from_row(row, headers):
     if scheduled_date:
         return scheduled_date, parse_scheduled_at(scheduled_date)
     return "", None
-    cleaned = raw.replace("T", " ").replace("Z", "").strip()
+    cleaned = compact_spaces(raw.replace("T", " ").replace("Z", "").replace("\u00a0", " ")).strip().strip("'\"")
     cleaned = re.sub(r"\s+[+-]\d{2}:?\d{2}$", "", cleaned)
     formats = [
         "%Y-%m-%d %H:%M:%S",
