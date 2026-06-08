@@ -4341,6 +4341,25 @@ def debug_setup_state_tabs_lite(secret):
     return {"ok": all(item["ok"] for item in results), "results": results}, 200
 
 
+@app.get("/debug/setup-posting-log/<secret>")
+def debug_setup_posting_log(secret):
+    if secret != env("WEBHOOK_SECRET"):
+        abort(404)
+    headers = ["post_event_id", "content_id", "platform", "media_type", "status", "result_json", "error", "created_at"]
+    result = []
+    try:
+        google_sheets_add_sheet("Posting_Log", rows=500, columns=8)
+        result.append({"step": "create", "ok": True})
+    except Exception as exc:
+        result.append({"step": "create", "ok": False, "error": str(exc)[:300]})
+    try:
+        google_sheets_write("Posting_Log", [headers], "A1")
+        result.append({"step": "headers", "ok": True})
+    except Exception as exc:
+        result.append({"step": "headers", "ok": False, "error": str(exc)[:300]})
+    return {"ok": any(item["step"] == "headers" and item["ok"] for item in result), "result": result}, 200
+
+
 @app.get("/debug/setup-config-tabs/<secret>")
 def debug_setup_config_tabs(secret):
     if secret != env("WEBHOOK_SECRET"):
