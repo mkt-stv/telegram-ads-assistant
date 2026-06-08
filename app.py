@@ -3554,6 +3554,14 @@ def settings_agent_handle(text):
         key = "brand_logo_url"
         label = "logo thương hiệu"
     elif any(x in plain for x in ["image provider", "provider anh", "nguon tao anh"]):
+        if value.lower() in ["9router", "ninerouter"]:
+            key = "image_provider"
+            label = "provider anh"
+            value = "9router"
+            RUNTIME_CONFIG[key] = value
+            save_state()
+            sheet_error = append_settings_change(key, value, note=f"Updated {label}")
+            return f"Da cap nhat {label}.\n\nGia tri moi:\n{value}" + sheet_note(sheet_error)
         allowed = {"mock", "gemini", "openai"}
         if value.lower() not in allowed:
             return "Provider ảnh chỉ nhận một trong ba giá trị: mock, gemini, openai."
