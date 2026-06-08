@@ -1842,20 +1842,6 @@ def parse_scheduled_at(value):
     raw = str(value or "").strip()
     if not raw:
         return None
-
-
-def scheduled_at_from_row(row, headers):
-    raw = content_row_value(row, headers, "scheduled_at")
-    if raw:
-        return raw, parse_scheduled_at(raw)
-    scheduled_date = content_row_value(row, headers, "scheduled_date")
-    scheduled_time = content_row_value(row, headers, "scheduled_time")
-    if scheduled_date and scheduled_time:
-        raw = f"{scheduled_date} {scheduled_time}"
-        return raw, parse_scheduled_at(raw)
-    if scheduled_date:
-        return scheduled_date, parse_scheduled_at(scheduled_date)
-    return "", None
     cleaned = compact_spaces(raw.replace("T", " ").replace("Z", "").replace("\u00a0", " ")).strip().strip("'\"")
     cleaned = re.sub(r"\s+[+-]\d{2}:?\d{2}$", "", cleaned)
     formats = [
@@ -1885,6 +1871,20 @@ def scheduled_at_from_row(row, headers):
         return datetime.fromisoformat(cleaned)
     except ValueError:
         return None
+
+
+def scheduled_at_from_row(row, headers):
+    raw = content_row_value(row, headers, "scheduled_at")
+    if raw:
+        return raw, parse_scheduled_at(raw)
+    scheduled_date = content_row_value(row, headers, "scheduled_date")
+    scheduled_time = content_row_value(row, headers, "scheduled_time")
+    if scheduled_date and scheduled_time:
+        raw = f"{scheduled_date} {scheduled_time}"
+        return raw, parse_scheduled_at(raw)
+    if scheduled_date:
+        return scheduled_date, parse_scheduled_at(scheduled_date)
+    return "", None
 
 
 def scheduler_status_plain(value):
