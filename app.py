@@ -38,6 +38,26 @@ CONFIG_WATCH_SHEETS = [
     "Campaign_Context!A1:K80",
 ]
 
+CONTENT_HEADERS = [
+    "content_id",
+    "scheduled_date",
+    "scheduled_time",
+    "platform",
+    "pillar_id",
+    "topic",
+    "draft_text",
+    "image_prompt",
+    "image_url",
+    "video_url",
+    "media_url",
+    "media_type",
+    "post_url",
+    "posted_at",
+    "stage",
+    "status",
+    "updated_at",
+]
+
 
 AGENT_CATALOG = {
     "manager": "Phân tích câu lệnh, giao việc cho agent phù hợp, giữ CONFIRM cho hành động thật.",
@@ -3240,6 +3260,49 @@ def debug_content_test(secret):
         status="pending_manual_image",
     )
     return {"ok": error is None, "content_id": content_id, "error": error}, 200
+
+
+@app.get("/debug/setup-content-calendar/<secret>")
+def debug_setup_content_calendar(secret):
+    if secret != env("WEBHOOK_SECRET"):
+        abort(404)
+    try:
+        google_sheets_write("Content", [CONTENT_HEADERS], "A1")
+        return {"ok": True, "headers": CONTENT_HEADERS}, 200
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)[:1000]}, 200
+
+
+@app.get("/debug/scheduler-seed/<secret>")
+def debug_scheduler_seed(secret):
+    if secret != env("WEBHOOK_SECRET"):
+        abort(404)
+    now_dt = bangkok_now() - timedelta(minutes=2)
+    content_id = new_record_id("sched_test")
+    row = [
+        content_id,
+        now_dt.strftime("%Y-%m-%d"),
+        now_dt.strftime("%H:%M"),
+        "Facebook",
+        "P1",
+        "scheduler smoke test",
+        "Scheduler Smoke Test\n\nĐây là bài test nội bộ để kiểm tra luồng lên lịch. Không bấm CONFIRM nếu không muốn đăng thật.",
+        "",
+        "",
+        "",
+        "",
+        "text",
+        "",
+        "",
+        "scheduled",
+        "scheduled",
+        now_text(),
+    ]
+    try:
+        google_sheets_append("Content", [row])
+        return {"ok": True, "content_id": content_id}, 200
+    except Exception as exc:
+        return {"ok": False, "content_id": content_id, "error": str(exc)[:1000]}, 200
 
 
 @app.get("/debug/task-queue-test/<secret>")
