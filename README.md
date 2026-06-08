@@ -71,8 +71,8 @@ Mutating commands require `CONFIRM`.
 
 Default scheduler mode is safe: it scans due rows in `Content`, sends Telegram approval buttons, and does not publish until confirmation.
 
-- Dry-run: `GET /cron/scheduler-tick/<secret>?dry_run=1`
-- Create Telegram approval for due rows: `GET /cron/scheduler-tick/<secret>?dry_run=0`
+- Dry-run: `GET /cron/scheduler-v2/<secret>?dry_run=1`
+- Create Telegram approval for due rows: `GET /cron/scheduler-v2/<secret>?dry_run=0`
 - Auto-post mode requires `AUTO_POST_SCHEDULED_CONTENT=true` and `auto_post=1`.
 
 Content rows need at least these columns:

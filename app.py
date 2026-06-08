@@ -3035,6 +3035,37 @@ def cron_scheduler_tick(secret):
         return {"ok": False, "error": str(exc)[:1000]}, 200
 
 
+@app.get("/cron/scheduler-v2/<secret>")
+def cron_scheduler_v2(secret):
+    if secret != os.environ.get("WEBHOOK_SECRET", ""):
+        abort(404)
+    try:
+        dry_run = request.args.get("dry_run", "1").lower() not in ["0", "false", "no"]
+        auto_post = request.args.get("auto_post", "0").lower() in ["1", "true", "yes"]
+        limit_raw = request.args.get("limit", "5")
+        try:
+            limit = max(1, min(20, int(limit_raw)))
+        except ValueError:
+            limit = 5
+        if auto_post and os.environ.get("AUTO_POST_SCHEDULED_CONTENT", "false").lower() not in ["1", "true", "yes", "on"]:
+            payload = {"ok": False, "error": "AUTO_POST_SCHEDULED_CONTENT chưa bật. Scheduler chỉ được tạo mã duyệt qua Telegram."}
+        else:
+            payload = process_due_content(limit=limit, dry_run=dry_run, auto_post=auto_post)
+        return app.response_class(
+            response=json.dumps(safe_json_value(payload), ensure_ascii=False),
+            status=200,
+            mimetype="application/json",
+        )
+    except Exception as exc:
+        app.logger.exception("Scheduler v2 failed")
+        append_bot_event("scheduler_v2_failed", "error", str(exc)[:500], "cron")
+        return app.response_class(
+            response=json.dumps({"ok": False, "error": str(exc)[:1000]}, ensure_ascii=False),
+            status=200,
+            mimetype="application/json",
+        )
+
+
 @app.get("/debug/gemini/<secret>")
 def debug_gemini(secret):
     if secret != env("WEBHOOK_SECRET"):
