@@ -1726,7 +1726,7 @@ def append_learning(source, finding, recommendation, confidence="medium", status
 
 CONTENT_COLUMN_ALIASES = {
     "content_id": ["content_id", "record_id", "id", "content id", "ma bai", "ma noi dung"],
-    "scheduled_at": ["scheduled_at", "schedule_at", "scheduled_time", "schedule_time", "lich_dang", "thoi_gian_dang", "gio_dang"],
+    "scheduled_at": ["scheduled_at", "schedule_at", "publish_at", "datetime", "lich_dang", "thoi_gian_dang"],
     "scheduled_date": ["scheduled_date", "schedule_date", "date", "ngay", "ngay_dang", "ngay_len_lich"],
     "scheduled_time": ["time", "post_time", "scheduled_hour", "gio", "gio_dang", "khung_gio"],
     "platform": ["platform", "nen_tang", "kenh"],
