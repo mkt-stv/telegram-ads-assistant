@@ -1415,7 +1415,7 @@ def composio_execute(tool_slug, input_payload):
         f"https://backend.composio.dev/api/v3.1/tools/execute/{tool_slug}",
         headers={"x-api-key": api_key, "Content-Type": "application/json"},
         json=body,
-        timeout=45,
+        timeout=max(5, min(25, int(os.environ.get("COMPOSIO_EXECUTE_TIMEOUT_SECONDS", "25")))),
     )
     if not res.ok:
         raise RuntimeError(res.text)
