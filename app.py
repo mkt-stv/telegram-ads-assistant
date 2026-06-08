@@ -94,6 +94,14 @@ def gemini_image_model():
     return os.environ.get("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image")
 
 
+def ninerouter_image_model():
+    return os.environ.get("NINEROUTER_IMAGE_MODEL", "openai/gpt-image-1")
+
+
+def ninerouter_base_url():
+    return os.environ.get("NINEROUTER_BASE_URL", "http://localhost:20128/v1").rstrip("/")
+
+
 def image_provider():
     return (RUNTIME_CONFIG.get("image_provider") or os.environ.get("IMAGE_PROVIDER", "openai")).lower()
 
@@ -1394,6 +1402,123 @@ def gemini_generate_image(prompt):
     raise RuntimeError("Gemini image response did not include image data.")
 
 
+def image_bytes_from_url_or_data(value):
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if raw.startswith("data:image/") and ";base64," in raw:
+        return base64.b64decode(raw.split(";base64,", 1)[1])
+    if re.match(r"^[A-Za-z0-9+/=\s]{32,}$", raw) and len(raw) % 4 == 0:
+        try:
+            return base64.b64decode(raw)
+        except Exception:
+            return None
+    if raw.startswith("http://") or raw.startswith("https://"):
+        img = requests.get(raw, timeout=60)
+        img.raise_for_status()
+        content_type = (img.headers.get("Content-Type") or "").lower()
+        if content_type.startswith("image/") or raw.lower().split("?", 1)[0].endswith((".png", ".jpg", ".jpeg", ".webp")):
+            return img.content
+    return None
+
+
+def find_image_bytes_deep(value):
+    if isinstance(value, dict):
+        for key in ["b64_json", "base64", "image_base64", "image"]:
+            found = image_bytes_from_url_or_data(value.get(key))
+            if found:
+                return found
+        for key in ["url", "image_url"]:
+            item = value.get(key)
+            if isinstance(item, dict):
+                found = image_bytes_from_url_or_data(item.get("url"))
+            else:
+                found = image_bytes_from_url_or_data(item)
+            if found:
+                return found
+        for key in ["data", "output", "content", "message", "choices", "images", "parts"]:
+            found = find_image_bytes_deep(value.get(key))
+            if found:
+                return found
+        for item in value.values():
+            found = find_image_bytes_deep(item)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            found = find_image_bytes_deep(item)
+            if found:
+                return found
+    elif isinstance(value, str):
+        found = image_bytes_from_url_or_data(value)
+        if found:
+            return found
+        match = re.search(r"data:image/[^;]+;base64,[A-Za-z0-9+/=\s]+", value)
+        if match:
+            return image_bytes_from_url_or_data(match.group(0))
+        match = re.search(r"https?://[^\s)\"']+\.(?:png|jpg|jpeg|webp)(?:\?[^\s)\"']*)?", value, re.I)
+        if match:
+            return image_bytes_from_url_or_data(match.group(0))
+    return None
+
+
+def ninerouter_headers():
+    headers = {"Content-Type": "application/json"}
+    key = os.environ.get("NINEROUTER_API_KEY") or os.environ.get("ROUTER_API_KEY") or os.environ.get("OPENAI_API_KEY")
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    return headers
+
+
+def ninerouter_generate_image(prompt):
+    base_url = ninerouter_base_url()
+    model = ninerouter_image_model()
+    image_payload = {
+        "model": model,
+        "prompt": prompt,
+        "size": os.environ.get("NINEROUTER_IMAGE_SIZE", os.environ.get("OPENAI_IMAGE_SIZE", "1024x1024")),
+        "n": 1,
+    }
+    first_error = ""
+    res = requests.post(
+        f"{base_url}/images/generations",
+        headers=ninerouter_headers(),
+        json=image_payload,
+        timeout=180,
+    )
+    if res.ok:
+        image_bytes = find_image_bytes_deep(res.json())
+        if image_bytes:
+            return image_bytes
+        first_error = "9Router images endpoint did not include image data."
+    else:
+        first_error = res.text[:1000]
+
+    chat_payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt,
+            }
+        ],
+        "modalities": ["text", "image"],
+        "response_format": {"type": "image"},
+    }
+    chat = requests.post(
+        f"{base_url}/chat/completions",
+        headers=ninerouter_headers(),
+        json=chat_payload,
+        timeout=180,
+    )
+    if not chat.ok:
+        raise RuntimeError(f"9Router image failed. images: {first_error}; chat: {chat.text[:1000]}")
+    image_bytes = find_image_bytes_deep(chat.json())
+    if image_bytes:
+        return image_bytes
+    raise RuntimeError(f"9Router chat response did not include image data. images: {first_error}; chat: {chat.text[:1000]}")
+
+
 def font_for_image(size):
     candidates = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
@@ -1451,6 +1576,8 @@ def generate_image(prompt):
         image_bytes = mock_generate_image(prompt)
     elif provider == "gemini":
         image_bytes = gemini_generate_image(prompt)
+    elif provider in ["9router", "ninerouter"]:
+        image_bytes = ninerouter_generate_image(prompt)
     else:
         image_bytes = openai_generate_image(prompt)
     return apply_brand_logo_overlay(image_bytes)
@@ -4684,6 +4811,45 @@ def debug_gemini_image(secret):
             os.environ.pop("GEMINI_IMAGE_MODEL", None)
         else:
             os.environ["GEMINI_IMAGE_MODEL"] = old_model
+
+
+@app.get("/debug/9router-image/<secret>")
+def debug_9router_image(secret):
+    if secret != env("WEBHOOK_SECRET"):
+        abort(404)
+    prompt = request.args.get("prompt") or "Create a simple premium 4:5 product image of Vietnamese workers wearing high quality safety uniforms. Minimal text."
+    old_provider = os.environ.get("IMAGE_PROVIDER")
+    old_model = os.environ.get("NINEROUTER_IMAGE_MODEL")
+    model = request.args.get("model") or ninerouter_image_model()
+    os.environ["IMAGE_PROVIDER"] = "9router"
+    os.environ["NINEROUTER_IMAGE_MODEL"] = model
+    try:
+        image_bytes = generate_image(prompt)
+        return {
+            "ok": True,
+            "provider": "9router",
+            "base_url": ninerouter_base_url(),
+            "model": model,
+            "bytes": len(image_bytes),
+            "sha256": hashlib.sha256(image_bytes).hexdigest()[:24],
+        }, 200
+    except Exception as exc:
+        return {
+            "ok": False,
+            "provider": "9router",
+            "base_url": ninerouter_base_url(),
+            "model": model,
+            "error": str(exc)[:1500],
+        }, 200
+    finally:
+        if old_provider is None:
+            os.environ.pop("IMAGE_PROVIDER", None)
+        else:
+            os.environ["IMAGE_PROVIDER"] = old_provider
+        if old_model is None:
+            os.environ.pop("NINEROUTER_IMAGE_MODEL", None)
+        else:
+            os.environ["NINEROUTER_IMAGE_MODEL"] = old_model
 
 
 @app.get("/debug/workspace/<secret>")

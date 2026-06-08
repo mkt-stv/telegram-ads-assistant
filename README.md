@@ -13,6 +13,11 @@ Set these in Render:
 - `OPENAI_API_KEY`
 - `OPENAI_IMAGE_MODEL` = `gpt-image-1.5`
 - `OPENAI_IMAGE_SIZE` = `1024x1024`
+- `IMAGE_PROVIDER` = `openai`, `gemini`, `9router`, or `mock`
+- `NINEROUTER_BASE_URL` = public 9Router `/v1` base URL. Localhost only works if the bot runs on the same machine.
+- `NINEROUTER_API_KEY` = optional bearer key for 9Router
+- `NINEROUTER_IMAGE_MODEL` = image-capable model routed by 9Router
+- `NINEROUTER_IMAGE_SIZE` = image size, default follows `OPENAI_IMAGE_SIZE`
 - `GOOGLE_DRIVE_FOLDER_ID` = `11T-9iJ-Q7WL6SnKXZ7cPzGw1FjTmPEeV`
 - `GOOGLE_SHEET_ID` = `1CjQsVzTAJSBXjhZGD3iwailQ7tTzUc4KjoV7fukywTk`
 - `GOOGLE_MEDIA_FOLDER_ID` = `1HqojclzE5iaPVovTGa-_A43P5oLx8CLw`
@@ -76,6 +81,14 @@ python set_telegram_webhook.py https://your-service.onrender.com
 - `CONFIRM 1234`
 
 Mutating commands require `CONFIRM`.
+
+## Image providers
+
+Set `IMAGE_PROVIDER=9router` to generate images through 9Router. The Render bot cannot call `http://localhost:20128/v1` on your computer. Use a public/tunnel URL from 9Router for `NINEROUTER_BASE_URL`, or run the bot on the same machine as 9Router.
+
+Safe test endpoint:
+
+- `GET /debug/9router-image/<secret>?model=<model>`
 
 ## Social publishing fallback
 
