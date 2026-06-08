@@ -1728,7 +1728,7 @@ CONTENT_COLUMN_ALIASES = {
     "content_id": ["content_id", "record_id", "id", "content id", "ma bai", "ma noi dung"],
     "scheduled_at": ["scheduled_at", "schedule_at", "publish_at", "datetime", "lich_dang", "thoi_gian_dang"],
     "scheduled_date": ["scheduled_date", "schedule_date", "date", "ngay", "ngay_dang", "ngay_len_lich"],
-    "scheduled_time": ["time", "post_time", "scheduled_hour", "gio", "gio_dang", "khung_gio"],
+    "scheduled_time": ["scheduled_time", "schedule_time", "time", "post_time", "scheduled_hour", "gio", "gio_dang", "khung_gio"],
     "platform": ["platform", "nen_tang", "kenh"],
     "topic": ["topic", "chu_de", "title", "tieu_de", "pillar", "content_pillar"],
     "draft_text": ["draft_text", "content", "noi_dung", "caption", "post_text", "bai_viet"],
