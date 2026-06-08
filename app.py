@@ -4321,6 +4321,26 @@ def debug_setup_state_tabs(secret):
         return {"ok": False, "error": str(exc)[:1000], "results": []}, 200
 
 
+@app.get("/debug/setup-state-tabs-lite/<secret>")
+def debug_setup_state_tabs_lite(secret):
+    if secret != env("WEBHOOK_SECRET"):
+        abort(404)
+    specs = {
+        "Bot_State": ["key", "value_json", "updated_at", "version"],
+        "Task_Queue": ["task_id", "source_update_id", "chat_id", "task_type", "payload_json", "status", "lease_until", "attempts", "result_preview", "error", "created_at", "updated_at"],
+        "Bot_Events": ["event_id", "created_at", "event_type", "status", "ref_id", "detail"],
+        "Posting_Log": ["post_event_id", "content_id", "platform", "media_type", "status", "result_json", "error", "created_at"],
+    }
+    results = []
+    for sheet_name, headers in specs.items():
+        try:
+            google_sheets_write(sheet_name, [headers], "A1")
+            results.append({"sheet": sheet_name, "ok": True})
+        except Exception as exc:
+            results.append({"sheet": sheet_name, "ok": False, "error": str(exc)[:300]})
+    return {"ok": all(item["ok"] for item in results), "results": results}, 200
+
+
 @app.get("/debug/setup-config-tabs/<secret>")
 def debug_setup_config_tabs(secret):
     if secret != env("WEBHOOK_SECRET"):
