@@ -19,6 +19,8 @@ app = Flask(__name__)
 PENDING = {}
 LAST_DRAFT = {}
 RUNTIME_CONFIG = {}
+POSTING_JOBS = {}
+POSTING_IDEMPOTENCY = {}
 CONFIG_LOADED_AT = 0
 CONFIG_TTL_SECONDS = 300
 TELEGRAM_OUTBOX = []
@@ -150,13 +152,15 @@ def state_file():
 
 
 def load_state():
-    global PENDING, LAST_DRAFT, RUNTIME_CONFIG, LAST_CONFIG_SIGNATURE, CURRENT_CONFIG_SIGNATURE, PROCESSED_UPDATES, TELEGRAM_OUTBOX
+    global PENDING, LAST_DRAFT, RUNTIME_CONFIG, POSTING_JOBS, POSTING_IDEMPOTENCY, LAST_CONFIG_SIGNATURE, CURRENT_CONFIG_SIGNATURE, PROCESSED_UPDATES, TELEGRAM_OUTBOX
     with STATE_LOCK:
         path = state_file()
         if not os.path.exists(path):
             PENDING = {}
             LAST_DRAFT = {}
             RUNTIME_CONFIG = {}
+            POSTING_JOBS = {}
+            POSTING_IDEMPOTENCY = {}
             LAST_CONFIG_SIGNATURE = ""
             CURRENT_CONFIG_SIGNATURE = ""
             PROCESSED_UPDATES = set()
@@ -168,6 +172,8 @@ def load_state():
             PENDING = payload.get("pending", {})
             LAST_DRAFT = payload.get("last_draft", {})
             RUNTIME_CONFIG = payload.get("runtime_config", {})
+            POSTING_JOBS = payload.get("posting_jobs", {})
+            POSTING_IDEMPOTENCY = payload.get("posting_idempotency", {})
             LAST_CONFIG_SIGNATURE = payload.get("last_config_signature", "")
             CURRENT_CONFIG_SIGNATURE = payload.get("current_config_signature", "")
             PROCESSED_UPDATES = set(payload.get("processed_updates", []))
@@ -184,6 +190,8 @@ def save_state():
             "last_draft": LAST_DRAFT,
             "pending": PENDING,
             "runtime_config": RUNTIME_CONFIG,
+            "posting_jobs": POSTING_JOBS,
+            "posting_idempotency": POSTING_IDEMPOTENCY,
             "last_config_signature": LAST_CONFIG_SIGNATURE,
             "current_config_signature": CURRENT_CONFIG_SIGNATURE,
             "processed_updates": list(PROCESSED_UPDATES)[-500:],
@@ -913,14 +921,37 @@ def attach_image_to_draft(chat_key, image_url, source="manual_link", async_sheet
     draft["image_source"] = source
     draft["media_source"] = source
     remember_last_draft(chat_key, draft, async_write=async_sheet)
-    append_content_record(
-        topic=f"{source}: {image_url}",
-        draft_text=draft.get("text", ""),
-        image_prompt=draft.get("image_prompt", ""),
-        stage="image_ready",
-        status="needs_review",
-        async_write=async_sheet,
-    )
+    content_id = draft.get("content_id")
+    updated = {"ok": False}
+    if content_id:
+        try:
+            updated = update_content_by_id(
+                content_id,
+                {
+                    "image_url": image_url,
+                    "media_url": image_url,
+                    "media_type": "image",
+                    "stage": "image_ready",
+                    "status": "needs_review",
+                    "updated_at": now_text(),
+                },
+            )
+        except Exception:
+            app.logger.exception("Could not update content row with image")
+    if not updated.get("ok"):
+        record_id, _ = append_content_record(
+            topic=f"{source}: {image_url}",
+            draft_text=draft.get("text", ""),
+            image_prompt=draft.get("image_prompt", ""),
+            image_url=image_url,
+            media_url=image_url,
+            media_type="image",
+            stage="image_ready",
+            status="needs_review",
+            async_write=async_sheet,
+        )
+        draft["content_id"] = record_id
+        remember_last_draft(chat_key, draft, async_write=async_sheet)
     return image_bytes, draft
 
 
@@ -937,14 +968,37 @@ def attach_video_to_draft(chat_key, video_url, source="manual_link", async_sheet
     draft["video_status"] = "video_ready"
     draft["media_source"] = source
     remember_last_draft(chat_key, draft, async_write=async_sheet)
-    append_content_record(
-        topic=f"{source}: {video_url}",
-        draft_text=draft.get("text", ""),
-        image_prompt=draft.get("image_prompt", ""),
-        stage="video_ready",
-        status="needs_review",
-        async_write=async_sheet,
-    )
+    content_id = draft.get("content_id")
+    updated = {"ok": False}
+    if content_id:
+        try:
+            updated = update_content_by_id(
+                content_id,
+                {
+                    "video_url": video_url,
+                    "media_url": video_url,
+                    "media_type": "video",
+                    "stage": "video_ready",
+                    "status": "needs_review",
+                    "updated_at": now_text(),
+                },
+            )
+        except Exception:
+            app.logger.exception("Could not update content row with video")
+    if not updated.get("ok"):
+        record_id, _ = append_content_record(
+            topic=f"{source}: {video_url}",
+            draft_text=draft.get("text", ""),
+            image_prompt=draft.get("image_prompt", ""),
+            video_url=video_url,
+            media_url=video_url,
+            media_type="video",
+            stage="video_ready",
+            status="needs_review",
+            async_write=async_sheet,
+        )
+        draft["content_id"] = record_id
+        remember_last_draft(chat_key, draft, async_write=async_sheet)
     return draft
 
 
@@ -1528,6 +1582,7 @@ def durable_state_value(value):
             "image_source",
             "media_source",
             "image_prompt",
+            "image_b64",
             "platform",
             "type",
             "expires",
@@ -1536,6 +1591,15 @@ def durable_state_value(value):
             "status",
             "entity",
             "id",
+            "job_id",
+            "idempotency_key",
+            "pending_code",
+            "source",
+            "attempts",
+            "post_url",
+            "result",
+            "created_at",
+            "updated_at",
         }
         for key, item in value.items():
             if isinstance(item, dict):
@@ -1547,7 +1611,12 @@ def durable_state_value(value):
 
 
 def bot_state_cell(name):
-    return {"last_draft": "A2", "pending": "A3"}.get(name, "A20")
+    return {
+        "last_draft": "A2",
+        "pending": "A3",
+        "posting_jobs": "A4",
+        "posting_idempotency": "A5",
+    }.get(name, "A20")
 
 
 def write_bot_state(name, value, async_write=True):
@@ -1675,7 +1744,19 @@ def enqueue_task(task_type, payload, source_update_id="", chat_id="", async_writ
         return task_id, str(exc)
 
 
-def append_content_record(topic, draft_text="", image_prompt="", stage="draft", status="needs_review", platform="facebook", async_write=False):
+def append_content_record(
+    topic,
+    draft_text="",
+    image_prompt="",
+    stage="draft",
+    status="needs_review",
+    platform="facebook",
+    image_url="",
+    video_url="",
+    media_url="",
+    media_type="",
+    async_write=False,
+):
     record_id = new_record_id("content")
     today = date.today().isoformat()
     row = [
@@ -1687,10 +1768,10 @@ def append_content_record(topic, draft_text="", image_prompt="", stage="draft", 
         topic[:500],
         draft_text,
         image_prompt,
-        "",
-        "",
-        "",
-        "",
+        image_url,
+        video_url,
+        media_url or video_url or image_url,
+        media_type or ("video" if video_url else "image" if image_url else ""),
         "",
         "",
         stage,
@@ -1790,7 +1871,7 @@ def update_content_by_id(content_id, updates):
     for offset, row in enumerate(rows, start=2):
         if content_row_value(row, headers, "content_id") == str(content_id):
             result = write_content_row_cells(offset, headers, updates)
-            return {"ok": True, "row": offset, **result}
+            return {"ok": not result.get("missing"), "row": offset, **result}
     return {"ok": False, "error": f"content_id not found: {content_id}"}
 
 
@@ -1811,6 +1892,198 @@ def append_posting_log(content_id, platform, media_type, status, result="", erro
     except Exception as exc:
         app.logger.exception("Could not append posting log")
         return str(exc)
+
+
+def posting_text_hash(text):
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()[:16]
+
+
+def posting_idempotency_key(item):
+    platform = strip_tone(str(item.get("platform", ""))).lower()
+    content_id = str(item.get("content_id") or "").strip()
+    media_url = str(item.get("video_url") or item.get("image_url") or item.get("media_url") or "").strip()
+    media_type = str(item.get("media_type") or ("video" if item.get("video_url") else "image" if item.get("image_url") or item.get("image_b64") else "text")).lower()
+    text_hash = posting_text_hash(item.get("text", ""))
+    image_b64 = item.get("image_b64") or ""
+    image_hash = hashlib.sha256(image_b64.encode("utf-8")).hexdigest()[:16] if image_b64 and not media_url else ""
+    base = content_id or text_hash
+    return "|".join([base, platform, media_type, media_url or image_hash or "no_media", text_hash])
+
+
+def remember_posting_state(async_write=True):
+    save_state()
+    write_bot_state("posting_jobs", POSTING_JOBS, async_write=async_write)
+    write_bot_state("posting_idempotency", POSTING_IDEMPOTENCY, async_write=async_write)
+
+
+def restore_posting_state():
+    if POSTING_JOBS and POSTING_IDEMPOTENCY:
+        return POSTING_JOBS
+    jobs = read_bot_state("posting_jobs")
+    idem = read_bot_state("posting_idempotency")
+    if isinstance(jobs, dict) and jobs:
+        POSTING_JOBS.update(jobs)
+    if isinstance(idem, dict) and idem:
+        POSTING_IDEMPOTENCY.update(idem)
+    if jobs or idem:
+        save_state()
+    return POSTING_JOBS
+
+
+def create_posting_job(item, pending_code="", source="confirm"):
+    restore_posting_state()
+    key = posting_idempotency_key(item)
+    existing_id = POSTING_IDEMPOTENCY.get(key)
+    if existing_id and existing_id in POSTING_JOBS:
+        existing = POSTING_JOBS[existing_id]
+        if existing.get("status") in ["queued", "posting", "uploading", "publishing", "posted"]:
+            return existing, True
+    previous_attempts = int(POSTING_JOBS.get(existing_id, {}).get("attempts", 0)) if existing_id else 0
+    job_id = new_record_id("postjob")
+    job = {
+        "job_id": job_id,
+        "idempotency_key": key,
+        "pending_code": pending_code,
+        "source": source,
+        "status": "queued",
+        "attempts": previous_attempts,
+        "content_id": str(item.get("content_id") or ""),
+        "platform": str(item.get("platform") or ""),
+        "media_type": str(item.get("media_type") or ("video" if item.get("video_url") else "image" if item.get("image_url") or item.get("image_b64") else "text")),
+        "media_url": str(item.get("video_url") or item.get("image_url") or item.get("media_url") or ""),
+        "text": item.get("text", ""),
+        "image_b64": item.get("image_b64") or "",
+        "image_url": item.get("image_url") or "",
+        "video_url": item.get("video_url") or "",
+        "result": "",
+        "post_url": "",
+        "last_error": "",
+        "created_at": now_text(),
+        "updated_at": now_text(),
+    }
+    POSTING_JOBS[job_id] = job
+    POSTING_IDEMPOTENCY[key] = job_id
+    remember_posting_state()
+    append_posting_log(job.get("content_id"), job.get("platform"), job.get("media_type"), "queued", {"job_id": job_id, "source": source})
+    return job, False
+
+
+def update_posting_job(job_id, **updates):
+    job = POSTING_JOBS.get(job_id)
+    if not job:
+        return {}
+    job.update(updates)
+    job["updated_at"] = now_text()
+    POSTING_JOBS[job_id] = job
+    remember_posting_state()
+    return job
+
+
+def execute_posting_job(job_id, notify=True):
+    with STATE_LOCK:
+        job = POSTING_JOBS.get(job_id)
+        if not job:
+            return "Khong tim thay posting job."
+        if job.get("status") == "posted":
+            return f"Bai nay da duoc dang truoc do. Job: {job_id}"
+        if job.get("status") in ["posting", "uploading", "publishing"]:
+            return f"Bai dang duoc xu ly. Job: {job_id}"
+        job["status"] = "posting"
+        job["attempts"] = int(job.get("attempts", 0)) + 1
+        job["updated_at"] = now_text()
+        POSTING_JOBS[job_id] = job
+        remember_posting_state()
+
+    content_id = job.get("content_id", "")
+    platform = job.get("platform", "")
+    media_type = job.get("media_type", "")
+    try:
+        append_posting_log(content_id, platform, media_type, "posting", {"job_id": job_id, "attempts": job.get("attempts")})
+        if content_id:
+            update_content_by_id(content_id, {"status": "posting", "stage": "posting", "updated_at": now_text()})
+        result = post_to_social(platform, job.get("text", ""), job.get("image_b64"), job.get("image_url"), job.get("video_url"))
+        post_url = find_first_url_deep(result)
+        update_posting_job(
+            job_id,
+            status="posted",
+            result=json.dumps(result, ensure_ascii=False)[:5000],
+            post_url=post_url,
+            last_error="",
+        )
+        append_posting_log(content_id, platform, media_type, "posted", {"job_id": job_id, "result": result})
+        if content_id:
+            update_content_by_id(
+                content_id,
+                {
+                    "status": "posted",
+                    "stage": "posted",
+                    "posted_at": now_text(),
+                    "post_url": post_url,
+                    "result_preview": json.dumps(result, ensure_ascii=False)[:1000],
+                    "updated_at": now_text(),
+                },
+            )
+        pending_code = job.get("pending_code", "")
+        with STATE_LOCK:
+            if pending_code:
+                PENDING.pop(pending_code, None)
+                remember_pending_state()
+        append_bot_event("social_post_job_posted", "ok", content_id or platform, job_id)
+        message = f"Da gui bai len {platform}. Job: {job_id}\nKet qua: {json.dumps(result, ensure_ascii=False)[:1000]}"
+        if notify:
+            send_telegram_async(message)
+        return message
+    except Exception as exc:
+        err = str(exc)[:1000]
+        update_posting_job(job_id, status="failed", last_error=err)
+        append_posting_log(content_id, platform, media_type, "failed", {"job_id": job_id}, err)
+        if content_id:
+            update_content_by_id(content_id, {"status": "failed", "last_error": err[:500], "updated_at": now_text()})
+        pending_code = job.get("pending_code", "")
+        with STATE_LOCK:
+            if pending_code and pending_code in PENDING:
+                PENDING[pending_code]["running"] = False
+                PENDING[pending_code]["last_error"] = err[:500]
+                remember_pending_state()
+        append_bot_event("social_post_job_failed", "error", err[:500], job_id)
+        if notify:
+            send_telegram_async(f"Dang bai that bai. Job: {job_id}\nLoi: {err[:700]}")
+        raise
+
+
+def posting_job_updated_at(job):
+    try:
+        return datetime.strptime(str(job.get("updated_at", "")), "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return datetime.min
+
+
+def process_posting_jobs(limit=3, retry_failed=False, notify=False):
+    restore_posting_state()
+    stale_minutes = int(os.environ.get("POSTING_JOB_STALE_MINUTES", "15"))
+    cutoff = datetime.now() - timedelta(minutes=stale_minutes)
+    candidates = []
+    with STATE_LOCK:
+        for job in POSTING_JOBS.values():
+            status = job.get("status")
+            if status == "queued":
+                candidates.append(job)
+            elif status in ["posting", "uploading", "publishing"] and posting_job_updated_at(job) < cutoff:
+                candidates.append(job)
+            elif retry_failed and status == "failed":
+                candidates.append(job)
+            if len(candidates) >= limit:
+                break
+    processed = []
+    errors = []
+    for job in candidates:
+        job_id = job.get("job_id")
+        try:
+            execute_posting_job(job_id, notify=notify)
+            processed.append({"job_id": job_id, "status": "posted"})
+        except Exception as exc:
+            errors.append({"job_id": job_id, "error": str(exc)[:500]})
+    return {"ok": not errors, "processed": processed, "errors": errors, "count": len(candidates)}
 
 
 def find_first_url_deep(value):
@@ -2022,6 +2295,148 @@ def process_due_content(limit=5, dry_run=True, auto_post=False):
                         f"Lịch: {scheduled_at.strftime('%Y-%m-%d %H:%M')}\n\n"
                         f"{preview_text(draft_text, 1200)}\n\n"
                         f"Mã xác nhận: {code}\nMã hết hạn sau 15 phút."
+                    ),
+                    confirm_buttons(code),
+                )
+                write_content_row_cells(
+                    row_number,
+                    headers,
+                    {"status": "pending_confirm", "stage": "waiting_approval", "result_preview": f"CONFIRM {code}", "updated_at": now_text()},
+                )
+                append_posting_log(content_id, platform, media_type, "pending_confirm", f"CONFIRM {code}")
+                append_bot_event("scheduler_pending_confirm", "ok", content_id, str(row_number))
+                processed.append({"row": row_number, "content_id": content_id, "status": "pending_confirm", "code": code})
+        except Exception as exc:
+            err = str(exc)[:500]
+            write_content_row_cells(row_number, headers, {"status": "failed", "last_error": err, "updated_at": now_text()})
+            append_posting_log(content_id, platform, media_type, "failed", "", err)
+            append_bot_event("scheduler_failed", "error", err, str(row_number))
+            errors.append({"row": row_number, "content_id": content_id, "error": err})
+
+    return {
+        "ok": not errors,
+        "dry_run": False,
+        "auto_post": auto_post,
+        "processed": processed,
+        "errors": errors,
+        "skipped": skipped,
+        "now_bangkok": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+def process_due_content(limit=5, dry_run=True, auto_post=False):
+    headers, rows = read_content_sheet()
+    has_schedule = content_header_index(headers, "scheduled_at") is not None or content_header_index(headers, "scheduled_date") is not None
+    missing_required = [key for key in ["status", "draft_text"] if content_header_index(headers, key) is None]
+    if not has_schedule:
+        missing_required.append("scheduled_at_or_scheduled_date")
+    if missing_required:
+        return {"ok": False, "error": "Content sheet thieu cot bat buoc.", "missing": missing_required}
+
+    now_dt = bangkok_now()
+    due = []
+    skipped = 0
+    errors = []
+    processed = []
+    for offset, row in enumerate(rows, start=2):
+        status = content_row_value(row, headers, "status")
+        if not is_scheduler_ready_status(status):
+            skipped += 1
+            continue
+        scheduled_at_raw, scheduled_at = scheduled_at_from_row(row, headers)
+        if not scheduled_at:
+            errors.append({"row": offset, "error": "scheduled_at khong doc duoc", "value": scheduled_at_raw})
+            continue
+        if scheduled_at > now_dt:
+            skipped += 1
+            continue
+        due.append((offset, row, scheduled_at))
+        if len(due) >= limit:
+            break
+
+    if dry_run:
+        return {
+            "ok": True,
+            "dry_run": True,
+            "now_bangkok": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            "due_count": len(due),
+            "skipped": skipped,
+            "errors": errors[:10],
+            "due": [
+                {
+                    "row": row_number,
+                    "content_id": content_row_value(row, headers, "content_id"),
+                    "scheduled_at": scheduled_at.strftime("%Y-%m-%d %H:%M:%S"),
+                    "status": content_row_value(row, headers, "status"),
+                    "platform": content_row_value(row, headers, "platform", "Facebook") or "Facebook",
+                    "media_type": scheduled_media_from_row(row, headers)[0],
+                    "preview": preview_text(content_row_value(row, headers, "draft_text"), 180),
+                }
+                for row_number, row, scheduled_at in due
+            ],
+        }
+
+    for row_number, row, scheduled_at in due:
+        content_id = content_row_value(row, headers, "content_id") or new_record_id("content")
+        platform = content_row_value(row, headers, "platform", "Facebook") or "Facebook"
+        draft_text = content_row_value(row, headers, "draft_text")
+        topic = content_row_value(row, headers, "topic")
+        media_type, image_url, video_url = scheduled_media_from_row(row, headers)
+        try:
+            if not draft_text:
+                draft_text = generate_content_text(topic or "Tao 1 bai viet P1")
+                write_content_row_cells(row_number, headers, {"draft_text": draft_text, "updated_at": now_text()})
+            if auto_post:
+                item = {
+                    "type": "social_post",
+                    "platform": platform,
+                    "text": draft_text,
+                    "image_url": image_url,
+                    "video_url": video_url,
+                    "media_url": video_url or image_url or "",
+                    "media_type": media_type,
+                    "content_id": content_id,
+                }
+                job, duplicate = create_posting_job(item, pending_code="", source="scheduler_auto")
+                if duplicate and job.get("status") == "posted":
+                    processed.append({"row": row_number, "content_id": content_id, "status": "already_posted", "job_id": job.get("job_id")})
+                    continue
+                write_content_row_cells(
+                    row_number,
+                    headers,
+                    {"status": "posting", "stage": "posting", "result_preview": f"JOB {job.get('job_id')}", "updated_at": now_text()},
+                )
+                execute_posting_job(job.get("job_id"), notify=False)
+                append_bot_event("scheduler_posted", "ok", content_id, str(row_number))
+                processed.append({"row": row_number, "content_id": content_id, "status": "posted", "job_id": job.get("job_id")})
+            else:
+                item = {
+                    "type": "social_post",
+                    "platform": platform,
+                    "text": draft_text,
+                    "image_url": image_url,
+                    "video_url": video_url,
+                    "media_url": video_url or image_url or "",
+                    "media_type": media_type,
+                    "content_id": content_id,
+                }
+                key = posting_idempotency_key(item)
+                existing_job_id = POSTING_IDEMPOTENCY.get(key)
+                existing_job = POSTING_JOBS.get(existing_job_id, {}) if existing_job_id else {}
+                if existing_job.get("status") in ["queued", "posting", "uploading", "publishing", "posted"]:
+                    processed.append({"row": row_number, "content_id": content_id, "status": f"already_{existing_job.get('status')}", "job_id": existing_job_id})
+                    continue
+                code = add_pending_social(platform, draft_text, None, image_url, content_id, video_url, media_type)
+                media_note = "kem video" if video_url else "kem anh" if image_url else "text-only"
+                send_telegram_buttons(
+                    (
+                        f"Bai da den lich dang.\n"
+                        f"Content ID: {content_id}\n"
+                        f"Nen tang: {platform}\n"
+                        f"Media: {media_note}\n"
+                        f"Lich: {scheduled_at.strftime('%Y-%m-%d %H:%M')}\n\n"
+                        f"{preview_text(draft_text, 1200)}\n\n"
+                        f"Ma xac nhan: {code}\nMa het han sau 15 phut."
                     ),
                     confirm_buttons(code),
                 )
@@ -3179,6 +3594,51 @@ def confirm(code):
         raise
 
 
+def confirm(code):
+    with STATE_LOCK:
+        restore_pending_state()
+        item = PENDING.get(code)
+        if not item or item.get("expires", 0) < time.time():
+            PENDING.pop(code, None)
+            remember_pending_state()
+            return "Ma CONFIRM khong dung hoac da het han."
+        if item.get("running"):
+            return "Lenh nay dang duoc xu ly. Cho ket qua trong giay lat."
+        item["running"] = True
+        PENDING[code] = item
+        remember_pending_state()
+
+    try:
+        if item.get("type") == "social_post":
+            job, duplicate = create_posting_job(item, pending_code=code, source="confirm")
+            job_id = job.get("job_id", "")
+            status = job.get("status", "")
+            if duplicate and status == "posted":
+                with STATE_LOCK:
+                    PENDING.pop(code, None)
+                    remember_pending_state()
+                return f"Bai nay da duoc dang truoc do. Job: {job_id}"
+            if duplicate and status in ["queued", "posting", "uploading", "publishing"]:
+                return f"Bai nay dang duoc xu ly. Job: {job_id}"
+            run_background("posting-job", execute_posting_job, job_id, True)
+            append_bot_event("social_post_job_started", "ok", item.get("content_id") or item.get("platform", ""), job_id)
+            return f"Da nhan lenh dang bai. Job: {job_id}\nBot se gui ket qua khi dang xong."
+
+        meta_post(item["id"], {"status": item["status"]})
+        with STATE_LOCK:
+            PENDING.pop(code, None)
+            remember_pending_state()
+        return f"Da thuc hien: {item['entity']} {item['id']} -> {item['status']}"
+    except Exception as exc:
+        err = str(exc)[:500]
+        with STATE_LOCK:
+            item["running"] = False
+            item["last_error"] = err
+            PENDING[code] = item
+            remember_pending_state()
+        raise
+
+
 def handle_text(text, async_sheet=False):
     plain = strip_tone(text)
     chat_key = "default"
@@ -3508,6 +3968,50 @@ def cron_scheduler_v2(secret):
             status=200,
             mimetype="application/json",
         )
+
+
+@app.get("/cron/posting-jobs/<secret>")
+def cron_posting_jobs(secret):
+    if secret != os.environ.get("WEBHOOK_SECRET", ""):
+        abort(404)
+    try:
+        limit = max(1, min(10, int(request.args.get("limit", "3"))))
+    except ValueError:
+        limit = 3
+    retry_failed = request.args.get("retry_failed", "0").lower() in ["1", "true", "yes"]
+    notify = request.args.get("notify", "0").lower() in ["1", "true", "yes"]
+    payload = process_posting_jobs(limit=limit, retry_failed=retry_failed, notify=notify)
+    return app.response_class(
+        response=json.dumps(safe_json_value(payload), ensure_ascii=False),
+        status=200,
+        mimetype="application/json",
+    )
+
+
+@app.get("/debug/posting-jobs/<secret>")
+def debug_posting_jobs(secret):
+    if secret != env("WEBHOOK_SECRET"):
+        abort(404)
+    with STATE_LOCK:
+        jobs = list(POSTING_JOBS.values())[-20:]
+    safe_jobs = []
+    for job in jobs:
+        safe_jobs.append(
+            {
+                "job_id": job.get("job_id"),
+                "status": job.get("status"),
+                "content_id": job.get("content_id"),
+                "platform": job.get("platform"),
+                "media_type": job.get("media_type"),
+                "media_url": job.get("media_url"),
+                "post_url": job.get("post_url"),
+                "attempts": job.get("attempts"),
+                "last_error": job.get("last_error"),
+                "created_at": job.get("created_at"),
+                "updated_at": job.get("updated_at"),
+            }
+        )
+    return {"ok": True, "jobs": safe_jobs, "count": len(POSTING_JOBS)}, 200
 
 
 @app.get("/debug/gemini/<secret>")
