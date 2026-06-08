@@ -2096,6 +2096,233 @@ def composio_upload_file(file_bytes, filename, mimetype, toolkit_slug, tool_slug
     return {"name": filename, "mimetype": mimetype, "s3key": s3key}
 
 
+def env_first(*names):
+    for name in names:
+        value = os.environ.get(name, "")
+        if value:
+            return value
+    return ""
+
+
+def bool_env(name, default=True):
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.lower() in ["1", "true", "yes", "on"]
+
+
+def facebook_page_id():
+    return env_first("FACEBOOK_PAGE_ID", "COMPOSIO_FACEBOOK_PAGE_ID")
+
+
+def facebook_page_access_token():
+    token = env_first("FACEBOOK_PAGE_ACCESS_TOKEN", "META_PAGE_ACCESS_TOKEN", "FACEBOOK_ACCESS_TOKEN", "META_ACCESS_TOKEN")
+    if not token:
+        raise RuntimeError("Thiếu FACEBOOK_PAGE_ACCESS_TOKEN hoặc META_PAGE_ACCESS_TOKEN để đăng trực tiếp lên Facebook Page.")
+    return token
+
+
+def facebook_graph_version():
+    return os.environ.get("META_API_VERSION", "v20.0")
+
+
+def facebook_direct_post_text(text):
+    page_id = facebook_page_id()
+    if not page_id:
+        raise RuntimeError("Thiếu FACEBOOK_PAGE_ID hoặc COMPOSIO_FACEBOOK_PAGE_ID.")
+    res = requests.post(
+        f"https://graph.facebook.com/{facebook_graph_version()}/{page_id}/feed",
+        data={"message": text, "published": "true", "access_token": facebook_page_access_token()},
+        timeout=45,
+    )
+    if not res.ok:
+        raise RuntimeError(res.text[:1500])
+    payload = res.json()
+    payload["provider"] = "facebook_graph"
+    return payload
+
+
+def facebook_direct_post_photo(text, image_bytes):
+    page_id = facebook_page_id()
+    if not page_id:
+        raise RuntimeError("Thiếu FACEBOOK_PAGE_ID hoặc COMPOSIO_FACEBOOK_PAGE_ID.")
+    res = requests.post(
+        f"https://graph.facebook.com/{facebook_graph_version()}/{page_id}/photos",
+        data={"message": text, "published": "true", "access_token": facebook_page_access_token()},
+        files={"source": ("telegram-post.png", io.BytesIO(image_bytes), "image/png")},
+        timeout=90,
+    )
+    if not res.ok:
+        raise RuntimeError(res.text[:1500])
+    payload = res.json()
+    payload["provider"] = "facebook_graph"
+    return payload
+
+
+def facebook_direct_post_video(text, video_bytes, mimetype="video/mp4"):
+    page_id = facebook_page_id()
+    if not page_id:
+        raise RuntimeError("Thiếu FACEBOOK_PAGE_ID hoặc COMPOSIO_FACEBOOK_PAGE_ID.")
+    filename = "telegram-post-video.mov" if mimetype == "video/quicktime" else "telegram-post-video.mp4"
+    res = requests.post(
+        f"https://graph-video.facebook.com/{facebook_graph_version()}/{page_id}/videos",
+        data={"description": text, "published": "true", "access_token": facebook_page_access_token()},
+        files={"source": (filename, io.BytesIO(video_bytes), mimetype)},
+        timeout=180,
+    )
+    if not res.ok:
+        raise RuntimeError(res.text[:1500])
+    payload = res.json()
+    payload["provider"] = "facebook_graph_video"
+    return payload
+
+
+def linkedin_access_token():
+    token = env_first("LINKEDIN_ACCESS_TOKEN", "LINKEDIN_PAGE_ACCESS_TOKEN")
+    if not token:
+        raise RuntimeError("Thiếu LINKEDIN_ACCESS_TOKEN để đăng trực tiếp lên LinkedIn.")
+    return token
+
+
+def linkedin_owner_urn():
+    owner = env_first("LINKEDIN_OWNER_URN")
+    if owner:
+        return owner
+    org_id = env_first("LINKEDIN_ORGANIZATION_ID", "LINKEDIN_COMPANY_ID")
+    if org_id:
+        return f"urn:li:organization:{org_id}"
+    person_id = env_first("LINKEDIN_PERSON_ID")
+    if person_id:
+        return f"urn:li:person:{person_id}"
+    raise RuntimeError("Thiếu LINKEDIN_OWNER_URN hoặc LINKEDIN_ORGANIZATION_ID/LINKEDIN_PERSON_ID.")
+
+
+def linkedin_headers(content_type="application/json"):
+    headers = {
+        "Authorization": f"Bearer {linkedin_access_token()}",
+        "LinkedIn-Version": os.environ.get("LINKEDIN_VERSION", "202506"),
+        "X-Restli-Protocol-Version": "2.0.0",
+    }
+    if content_type:
+        headers["Content-Type"] = content_type
+    return headers
+
+
+def linkedin_create_post(text, media_urn="", media_title="Media"):
+    payload = {
+        "author": linkedin_owner_urn(),
+        "commentary": text,
+        "visibility": "PUBLIC",
+        "distribution": {
+            "feedDistribution": "MAIN_FEED",
+            "targetEntities": [],
+            "thirdPartyDistributionChannels": [],
+        },
+        "lifecycleState": "PUBLISHED",
+        "isReshareDisabledByAuthor": False,
+    }
+    if media_urn:
+        payload["content"] = {"media": {"id": media_urn, "title": media_title[:200]}}
+    res = requests.post(
+        "https://api.linkedin.com/rest/posts",
+        headers=linkedin_headers(),
+        json=payload,
+        timeout=45,
+    )
+    if res.status_code not in [200, 201]:
+        raise RuntimeError(res.text[:1500])
+    result = {"provider": "linkedin_rest", "status_code": res.status_code}
+    if res.headers.get("x-restli-id"):
+        result["post_urn"] = res.headers.get("x-restli-id")
+    try:
+        result["response"] = res.json()
+    except Exception:
+        result["response"] = res.text[:500]
+    return result
+
+
+def linkedin_upload_image(image_bytes):
+    init_res = requests.post(
+        "https://api.linkedin.com/rest/images?action=initializeUpload",
+        headers=linkedin_headers(),
+        json={"initializeUploadRequest": {"owner": linkedin_owner_urn()}},
+        timeout=45,
+    )
+    if not init_res.ok:
+        raise RuntimeError(init_res.text[:1500])
+    value = init_res.json().get("value", {})
+    upload_url = value.get("uploadUrl")
+    image_urn = value.get("image")
+    if not upload_url or not image_urn:
+        raise RuntimeError(f"LinkedIn image upload init thiếu uploadUrl/image: {value}")
+    put = requests.put(upload_url, data=image_bytes, headers={"Content-Type": "image/png"}, timeout=90)
+    if put.status_code not in [200, 201]:
+        raise RuntimeError(put.text[:1500])
+    return image_urn
+
+
+def linkedin_upload_video(video_bytes):
+    init_res = requests.post(
+        "https://api.linkedin.com/rest/videos?action=initializeUpload",
+        headers=linkedin_headers(),
+        json={
+            "initializeUploadRequest": {
+                "owner": linkedin_owner_urn(),
+                "fileSizeBytes": len(video_bytes),
+                "uploadCaptions": False,
+                "uploadThumbnail": False,
+            }
+        },
+        timeout=45,
+    )
+    if not init_res.ok:
+        raise RuntimeError(init_res.text[:1500])
+    value = init_res.json().get("value", {})
+    video_urn = value.get("video")
+    upload_token = value.get("uploadToken", "")
+    instructions = value.get("uploadInstructions") or []
+    if not video_urn or not instructions:
+        raise RuntimeError(f"LinkedIn video upload init thiếu video/uploadInstructions: {value}")
+    etags = []
+    for item in instructions:
+        first = int(item.get("firstByte", 0))
+        last = int(item.get("lastByte", len(video_bytes) - 1))
+        upload_url = item.get("uploadUrl")
+        if not upload_url:
+            raise RuntimeError("LinkedIn video upload instruction thiếu uploadUrl.")
+        put = requests.put(upload_url, data=video_bytes[first : last + 1], timeout=120)
+        if put.status_code not in [200, 201]:
+            raise RuntimeError(put.text[:1500])
+        etag = (put.headers.get("ETag") or "").strip('"')
+        if etag:
+            etags.append(etag)
+    finalize_payload = {"finalizeUploadRequest": {"video": video_urn}}
+    if upload_token:
+        finalize_payload["finalizeUploadRequest"]["uploadToken"] = upload_token
+    if etags:
+        finalize_payload["finalizeUploadRequest"]["uploadedPartIds"] = etags
+    final_res = requests.post(
+        "https://api.linkedin.com/rest/videos?action=finalizeUpload",
+        headers=linkedin_headers(),
+        json=finalize_payload,
+        timeout=45,
+    )
+    if final_res.status_code not in [200, 201, 202]:
+        raise RuntimeError(final_res.text[:1500])
+    return video_urn
+
+
+def composio_payload_from_env(env_name, text, **media):
+    raw = os.environ.get(env_name, "")
+    if not raw:
+        return None
+    payload = json.loads(raw.replace("{text}", text))
+    for key, value in media.items():
+        if value is not None:
+            payload.setdefault(key, value)
+    return payload
+
+
 def post_to_social(platform, text, image_b64=None, image_url=None, video_url=None):
     platform_key = strip_tone(platform).upper()
     if "FACEBOOK" in platform_key:
@@ -2163,6 +2390,175 @@ def post_to_social(platform, text, image_b64=None, image_url=None, video_url=Non
     else:
         payload = default_payload
     return composio_execute(action_id, payload)
+
+
+def composio_social_execute(action_id, payload_env_name, default_payload, text, upload_fields=None):
+    if not action_id:
+        raise RuntimeError("Thieu Composio action id cho lenh dang bai nay.")
+    payload_json = os.environ.get(payload_env_name, "")
+    payload = json.loads(payload_json.replace("{text}", text)) if payload_json else dict(default_payload)
+    for key, value in (upload_fields or {}).items():
+        if value is not None:
+            payload.setdefault(key, value)
+    return composio_execute(action_id, payload)
+
+
+def post_to_social(platform, text, image_b64=None, image_url=None, video_url=None):
+    platform_key = strip_tone(platform).upper()
+    fallback_enabled = bool_env("SOCIAL_DIRECT_FALLBACK_ENABLED", True)
+    composio_error = ""
+
+    if "FACEBOOK" in platform_key:
+        if video_url:
+            video_bytes, video_mimetype = download_video_from_url(video_url)
+            action_id = os.environ.get("COMPOSIO_FACEBOOK_VIDEO_ACTION_ID")
+            if action_id:
+                try:
+                    video = composio_upload_file(video_bytes, "telegram-post-video.mp4", video_mimetype, "facebook", action_id)
+                    return composio_social_execute(
+                        action_id,
+                        "COMPOSIO_FACEBOOK_VIDEO_INPUT_JSON",
+                        {
+                            "page_id": env("COMPOSIO_FACEBOOK_PAGE_ID"),
+                            "description": text,
+                            "video": video,
+                            "published": True,
+                        },
+                        text,
+                        {"video": video, "description": text, "page_id": env("COMPOSIO_FACEBOOK_PAGE_ID") or None},
+                    )
+                except Exception as exc:
+                    composio_error = str(exc)[:500]
+                    if not fallback_enabled:
+                        raise
+            result = facebook_direct_post_video(text, video_bytes, video_mimetype)
+            if composio_error:
+                result["composio_fallback_reason"] = composio_error
+            return result
+
+        image_bytes = None
+        if image_b64:
+            image_bytes = base64.b64decode(image_b64)
+        elif image_url:
+            image_bytes = download_image_from_url(image_url)
+
+        if image_bytes:
+            action_id = os.environ.get("COMPOSIO_FACEBOOK_PHOTO_ACTION_ID", "FACEBOOK_CREATE_PHOTO_POST")
+            if action_id:
+                try:
+                    photo = composio_upload_file(image_bytes, "telegram-post.png", "image/png", "facebook", action_id)
+                    return composio_social_execute(
+                        action_id,
+                        "COMPOSIO_FACEBOOK_PHOTO_INPUT_JSON",
+                        {
+                            "page_id": env("COMPOSIO_FACEBOOK_PAGE_ID"),
+                            "message": text,
+                            "photo": photo,
+                            "published": True,
+                        },
+                        text,
+                        {"photo": photo, "message": text, "page_id": env("COMPOSIO_FACEBOOK_PAGE_ID") or None},
+                    )
+                except Exception as exc:
+                    composio_error = str(exc)[:500]
+                    if not fallback_enabled:
+                        raise
+            result = facebook_direct_post_photo(text, image_bytes)
+            if composio_error:
+                result["composio_fallback_reason"] = composio_error
+            return result
+
+        action_id = env("COMPOSIO_FACEBOOK_POST_ACTION_ID")
+        if action_id:
+            try:
+                return composio_social_execute(
+                    action_id,
+                    "COMPOSIO_FACEBOOK_POST_INPUT_JSON",
+                    {"page_id": env("COMPOSIO_FACEBOOK_PAGE_ID"), "message": text, "published": True},
+                    text,
+                    {"message": text, "page_id": env("COMPOSIO_FACEBOOK_PAGE_ID") or None},
+                )
+            except Exception as exc:
+                composio_error = str(exc)[:500]
+                if not fallback_enabled:
+                    raise
+        result = facebook_direct_post_text(text)
+        if composio_error:
+            result["composio_fallback_reason"] = composio_error
+        return result
+
+    if "LINKEDIN" in platform_key:
+        if video_url:
+            video_bytes, video_mimetype = download_video_from_url(video_url)
+            if video_mimetype not in ["video/mp4", "application/octet-stream"]:
+                raise RuntimeError("LinkedIn direct API chi ho tro on dinh video MP4. Hay dung file .mp4.")
+            action_id = os.environ.get("COMPOSIO_LINKEDIN_VIDEO_ACTION_ID")
+            if action_id:
+                try:
+                    video = composio_upload_file(video_bytes, "telegram-post-video.mp4", video_mimetype, "linkedin", action_id)
+                    return composio_social_execute(
+                        action_id,
+                        "COMPOSIO_LINKEDIN_VIDEO_INPUT_JSON",
+                        {"text": text, "video": video},
+                        text,
+                        {"video": video, "text": text},
+                    )
+                except Exception as exc:
+                    composio_error = str(exc)[:500]
+                    if not fallback_enabled:
+                        raise
+            video_urn = linkedin_upload_video(video_bytes)
+            result = linkedin_create_post(text, video_urn, "Video")
+            if composio_error:
+                result["composio_fallback_reason"] = composio_error
+            return result
+
+        image_bytes = None
+        if image_b64:
+            image_bytes = base64.b64decode(image_b64)
+        elif image_url:
+            image_bytes = download_image_from_url(image_url)
+
+        if image_bytes:
+            action_id = os.environ.get("COMPOSIO_LINKEDIN_PHOTO_ACTION_ID") or os.environ.get("COMPOSIO_LINKEDIN_IMAGE_ACTION_ID")
+            if action_id:
+                try:
+                    photo = composio_upload_file(image_bytes, "telegram-post.png", "image/png", "linkedin", action_id)
+                    return composio_social_execute(
+                        action_id,
+                        "COMPOSIO_LINKEDIN_PHOTO_INPUT_JSON",
+                        {"text": text, "image": photo},
+                        text,
+                        {"image": photo, "photo": photo, "text": text},
+                    )
+                except Exception as exc:
+                    composio_error = str(exc)[:500]
+                    if not fallback_enabled:
+                        raise
+            image_urn = linkedin_upload_image(image_bytes)
+            result = linkedin_create_post(text, image_urn, "Image")
+            if composio_error:
+                result["composio_fallback_reason"] = composio_error
+            return result
+
+        action_id = env("COMPOSIO_LINKEDIN_POST_ACTION_ID")
+        if action_id:
+            try:
+                return composio_social_execute(action_id, "COMPOSIO_LINKEDIN_POST_INPUT_JSON", {"text": text}, text, {"text": text})
+            except Exception as exc:
+                composio_error = str(exc)[:500]
+                if not fallback_enabled:
+                    raise
+        result = linkedin_create_post(text)
+        if composio_error:
+            result["composio_fallback_reason"] = composio_error
+        return result
+
+    if "INSTAGRAM" in platform_key:
+        action_id = env("COMPOSIO_INSTAGRAM_POST_ACTION_ID")
+        return composio_social_execute(action_id, "COMPOSIO_INSTAGRAM_POST_INPUT_JSON", {"caption": text}, text, {"caption": text})
+
+    raise RuntimeError(f"Chua ho tro nen tang: {platform}")
 
 
 def meta_get(path, params=None):
@@ -3158,6 +3554,51 @@ def debug_composio(secret):
     return status
 
 
+def social_direct_status():
+    linkedin_owner_configured = bool(
+        os.environ.get("LINKEDIN_OWNER_URN")
+        or os.environ.get("LINKEDIN_ORGANIZATION_ID")
+        or os.environ.get("LINKEDIN_COMPANY_ID")
+        or os.environ.get("LINKEDIN_PERSON_ID")
+    )
+    return {
+        "fallback_enabled": bool_env("SOCIAL_DIRECT_FALLBACK_ENABLED", True),
+        "facebook": {
+            "has_page_id": bool(facebook_page_id()),
+            "has_page_access_token": bool(env_first("FACEBOOK_PAGE_ACCESS_TOKEN", "META_PAGE_ACCESS_TOKEN", "FACEBOOK_ACCESS_TOKEN", "META_ACCESS_TOKEN")),
+            "graph_version": facebook_graph_version(),
+            "composio_text_action": bool(os.environ.get("COMPOSIO_FACEBOOK_POST_ACTION_ID")),
+            "composio_photo_action": bool(os.environ.get("COMPOSIO_FACEBOOK_PHOTO_ACTION_ID")),
+            "composio_video_action": bool(os.environ.get("COMPOSIO_FACEBOOK_VIDEO_ACTION_ID")),
+            "can_direct_text": bool(facebook_page_id() and env_first("FACEBOOK_PAGE_ACCESS_TOKEN", "META_PAGE_ACCESS_TOKEN", "FACEBOOK_ACCESS_TOKEN", "META_ACCESS_TOKEN")),
+            "can_direct_photo": bool(facebook_page_id() and env_first("FACEBOOK_PAGE_ACCESS_TOKEN", "META_PAGE_ACCESS_TOKEN", "FACEBOOK_ACCESS_TOKEN", "META_ACCESS_TOKEN")),
+            "can_direct_video": bool(facebook_page_id() and env_first("FACEBOOK_PAGE_ACCESS_TOKEN", "META_PAGE_ACCESS_TOKEN", "FACEBOOK_ACCESS_TOKEN", "META_ACCESS_TOKEN")),
+        },
+        "linkedin": {
+            "has_access_token": bool(env_first("LINKEDIN_ACCESS_TOKEN", "LINKEDIN_PAGE_ACCESS_TOKEN")),
+            "has_owner": linkedin_owner_configured,
+            "linkedin_version": os.environ.get("LINKEDIN_VERSION", "202506"),
+            "composio_text_action": bool(os.environ.get("COMPOSIO_LINKEDIN_POST_ACTION_ID")),
+            "composio_photo_action": bool(os.environ.get("COMPOSIO_LINKEDIN_PHOTO_ACTION_ID") or os.environ.get("COMPOSIO_LINKEDIN_IMAGE_ACTION_ID")),
+            "composio_video_action": bool(os.environ.get("COMPOSIO_LINKEDIN_VIDEO_ACTION_ID")),
+            "can_direct_text": bool(env_first("LINKEDIN_ACCESS_TOKEN", "LINKEDIN_PAGE_ACCESS_TOKEN") and linkedin_owner_configured),
+            "can_direct_photo": bool(env_first("LINKEDIN_ACCESS_TOKEN", "LINKEDIN_PAGE_ACCESS_TOKEN") and linkedin_owner_configured),
+            "can_direct_video": bool(env_first("LINKEDIN_ACCESS_TOKEN", "LINKEDIN_PAGE_ACCESS_TOKEN") and linkedin_owner_configured),
+        },
+        "limits": {
+            "max_social_video_mb": max_video_bytes() // 1024 // 1024,
+            "note": "Video lon nen chay qua queue/background de tranh timeout callback Telegram.",
+        },
+    }
+
+
+@app.get("/debug/social-direct/<secret>")
+def debug_social_direct(secret):
+    if secret != env("WEBHOOK_SECRET"):
+        abort(404)
+    return social_direct_status(), 200
+
+
 @app.get("/debug/composio-toolkit/<secret>")
 def debug_composio_toolkit(secret):
     if secret != env("WEBHOOK_SECRET"):
@@ -3798,11 +4239,7 @@ def telegram(secret):
             return {"ok": True}
         answer_callback_query_async(callback.get("id"), "Dang xu ly")
         try:
-            result = handle_callback(callback.get("data", ""))
-            if result.get("buttons"):
-                send_telegram_buttons(result.get("text", ""), result.get("buttons"))
-            else:
-                send_telegram(result.get("text", ""))
+            process_callback_async(callback.get("data", ""))
         except Exception as exc:
             app.logger.exception("Could not enqueue Telegram callback")
             try:

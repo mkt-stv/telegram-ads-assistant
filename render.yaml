@@ -59,9 +59,27 @@ services:
         value: FACEBOOK_CREATE_PHOTO_POST
       - key: COMPOSIO_FACEBOOK_VIDEO_ACTION_ID
         sync: false
+      - key: SOCIAL_DIRECT_FALLBACK_ENABLED
+        value: "true"
+      - key: FACEBOOK_PAGE_ID
+        sync: false
+      - key: FACEBOOK_PAGE_ACCESS_TOKEN
+        sync: false
       - key: MAX_SOCIAL_VIDEO_MB
         value: "50"
       - key: COMPOSIO_LINKEDIN_POST_ACTION_ID
         sync: false
+      - key: COMPOSIO_LINKEDIN_PHOTO_ACTION_ID
+        sync: false
+      - key: COMPOSIO_LINKEDIN_VIDEO_ACTION_ID
+        sync: false
+      - key: LINKEDIN_ACCESS_TOKEN
+        sync: false
+      - key: LINKEDIN_OWNER_URN
+        sync: false
+      - key: LINKEDIN_ORGANIZATION_ID
+        sync: false
+      - key: LINKEDIN_VERSION
+        value: "202506"
       - key: WEBHOOK_SECRET
         generateValue: true

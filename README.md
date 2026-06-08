@@ -25,6 +25,16 @@ Set these in Render:
 - `COMPOSIO_FACEBOOK_POST_ACTION_ID` = `FACEBOOK_CREATE_POST`
 - `COMPOSIO_FACEBOOK_PHOTO_ACTION_ID` = `FACEBOOK_CREATE_PHOTO_POST`
 - `COMPOSIO_FACEBOOK_VIDEO_ACTION_ID` = Facebook video upload/post action in Composio
+- `SOCIAL_DIRECT_FALLBACK_ENABLED` = `true`
+- `FACEBOOK_PAGE_ID` = Facebook Page ID for direct Graph API fallback
+- `FACEBOOK_PAGE_ACCESS_TOKEN` = Page access token for direct Facebook text/photo/video posts
+- `LINKEDIN_ACCESS_TOKEN` = LinkedIn token with posting scope
+- `LINKEDIN_OWNER_URN` = `urn:li:organization:<id>` or `urn:li:person:<id>`
+- `LINKEDIN_ORGANIZATION_ID` = optional shortcut if `LINKEDIN_OWNER_URN` is not set
+- `LINKEDIN_VERSION` = LinkedIn API version, default `202506`
+- `COMPOSIO_LINKEDIN_POST_ACTION_ID`
+- `COMPOSIO_LINKEDIN_PHOTO_ACTION_ID`
+- `COMPOSIO_LINKEDIN_VIDEO_ACTION_ID`
 - `MAX_SOCIAL_VIDEO_MB` = max video download size before posting, default `50`
 - `AUTO_POST_SCHEDULED_CONTENT` = set `true` only if scheduled posts should publish without Telegram approval
 - `WEBHOOK_SECRET`
@@ -66,6 +76,19 @@ python set_telegram_webhook.py https://your-service.onrender.com
 - `CONFIRM 1234`
 
 Mutating commands require `CONFIRM`.
+
+## Social publishing fallback
+
+The bot tries Composio first when the action id is configured. If Composio is missing or fails and `SOCIAL_DIRECT_FALLBACK_ENABLED=true`, it falls back to official APIs:
+
+- Facebook Page text/photo/video: Graph API using `FACEBOOK_PAGE_ID` and `FACEBOOK_PAGE_ACCESS_TOKEN`.
+- LinkedIn text/image/video: LinkedIn REST APIs using `LINKEDIN_ACCESS_TOKEN` and `LINKEDIN_OWNER_URN`.
+
+Check current safe config without exposing tokens:
+
+- `GET /debug/social-direct/<secret>`
+
+Video uploads are supported for workflow testing, but large videos should move to a background queue to avoid Telegram callback timeout.
 
 ## Scheduler
 
