@@ -1871,6 +1871,16 @@ def scheduled_at_from_row(row, headers):
             return datetime.strptime(cleaned, fmt)
         except ValueError:
             pass
+    match = re.search(r"(\d{4})\D+(\d{1,2})\D+(\d{1,2})(?:\D+(\d{1,2})\D+(\d{1,2})(?:\D+(\d{1,2}))?)?", cleaned)
+    if match:
+        year, month, day = [int(match.group(i)) for i in range(1, 4)]
+        hour = int(match.group(4) or 0)
+        minute = int(match.group(5) or 0)
+        second = int(match.group(6) or 0)
+        try:
+            return datetime(year, month, day, hour, minute, second)
+        except ValueError:
+            return None
     try:
         return datetime.fromisoformat(cleaned)
     except ValueError:
