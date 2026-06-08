@@ -1707,6 +1707,8 @@ def append_learning(source, finding, recommendation, confidence="medium", status
 CONTENT_COLUMN_ALIASES = {
     "content_id": ["content_id", "record_id", "id", "content id", "ma bai", "ma noi dung"],
     "scheduled_at": ["scheduled_at", "schedule_at", "scheduled_time", "schedule_time", "lich_dang", "thoi_gian_dang", "gio_dang"],
+    "scheduled_date": ["scheduled_date", "schedule_date", "date", "ngay", "ngay_dang", "ngay_len_lich"],
+    "scheduled_time": ["time", "post_time", "scheduled_hour", "gio", "gio_dang", "khung_gio"],
     "platform": ["platform", "nen_tang", "kenh"],
     "topic": ["topic", "chu_de", "title", "tieu_de", "pillar", "content_pillar"],
     "draft_text": ["draft_text", "content", "noi_dung", "caption", "post_text", "bai_viet"],
@@ -1820,6 +1822,20 @@ def parse_scheduled_at(value):
     raw = str(value or "").strip()
     if not raw:
         return None
+
+
+def scheduled_at_from_row(row, headers):
+    raw = content_row_value(row, headers, "scheduled_at")
+    if raw:
+        return raw, parse_scheduled_at(raw)
+    scheduled_date = content_row_value(row, headers, "scheduled_date")
+    scheduled_time = content_row_value(row, headers, "scheduled_time")
+    if scheduled_date and scheduled_time:
+        raw = f"{scheduled_date} {scheduled_time}"
+        return raw, parse_scheduled_at(raw)
+    if scheduled_date:
+        return scheduled_date, parse_scheduled_at(scheduled_date)
+    return "", None
     cleaned = raw.replace("T", " ").replace("Z", "").strip()
     cleaned = re.sub(r"\s+[+-]\d{2}:?\d{2}$", "", cleaned)
     formats = [
@@ -1886,7 +1902,10 @@ def pending_code():
 
 def process_due_content(limit=5, dry_run=True, auto_post=False):
     headers, rows = read_content_sheet()
-    missing_required = [key for key in ["status", "scheduled_at", "draft_text"] if content_header_index(headers, key) is None]
+    has_schedule = content_header_index(headers, "scheduled_at") is not None or content_header_index(headers, "scheduled_date") is not None
+    missing_required = [key for key in ["status", "draft_text"] if content_header_index(headers, key) is None]
+    if not has_schedule:
+        missing_required.append("scheduled_at_or_scheduled_date")
     if missing_required:
         return {"ok": False, "error": "Content sheet thiếu cột bắt buộc.", "missing": missing_required}
 
@@ -1900,8 +1919,7 @@ def process_due_content(limit=5, dry_run=True, auto_post=False):
         if not is_scheduler_ready_status(status):
             skipped += 1
             continue
-        scheduled_at_raw = content_row_value(row, headers, "scheduled_at")
-        scheduled_at = parse_scheduled_at(scheduled_at_raw)
+        scheduled_at_raw, scheduled_at = scheduled_at_from_row(row, headers)
         if not scheduled_at:
             errors.append({"row": offset, "error": "scheduled_at không đọc được", "value": scheduled_at_raw})
             continue
